@@ -119,28 +119,38 @@ static dispatch_queue_t get_disk_io_queue() {
 	return _diskIOQueue;
 }
 
-- (dispatch_source_t)maintenanceTimer {
-    dispatch_once(&timerOnceToken, ^{
-        dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
-        _maintenanceTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
-        if (_maintenanceTimer) {
-            dispatch_source_set_timer(_maintenanceTimer, dispatch_walltime(DISPATCH_TIME_NOW, kAFURLCacheMaintenanceTime * NSEC_PER_SEC), 
-                                      kAFURLCacheMaintenanceTime * NSEC_PER_SEC, kAFURLCacheMaintenanceTime/2 * NSEC_PER_SEC);
-            __block SDURLCache *blockSelf = self;
-            dispatch_source_set_event_handler(_maintenanceTimer, ^{
-                [blockSelf periodicMaintenance];
-                
-                // will abuse cache queue to lock timer
-                dispatch_async(get_disk_cache_queue(), ^{
-                    dispatch_suspend(_maintenanceTimer); // pause timer
-                    _timerPaused = YES;
-                });            
-            });
-            // initially wake up timer
-            dispatch_resume(_maintenanceTimer);
-        }
-    });
-    return _maintenanceTimer;
+- (void)createMaintenanceTimer {
+    dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
+    _maintenanceTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
+    if (_maintenanceTimer) {
+        dispatch_source_set_timer(_maintenanceTimer, dispatch_walltime(DISPATCH_TIME_NOW, kAFURLCacheMaintenanceTime * NSEC_PER_SEC), 
+                                  kAFURLCacheMaintenanceTime * NSEC_PER_SEC, kAFURLCacheMaintenanceTime/2 * NSEC_PER_SEC);
+        __block SDURLCache *blockSelf = self;
+        dispatch_source_set_event_handler(_maintenanceTimer, ^{
+            [blockSelf periodicMaintenance];
+            
+            // will abuse cache queue to lock timer
+            dispatch_async(get_disk_cache_queue(), ^{
+                dispatch_suspend(_maintenanceTimer); // pause timer
+                _timerPaused = YES;
+            });            
+        });
+        // initially wake up timer
+        dispatch_resume(_maintenanceTimer);
+    }
+}
+
+- (void)createDiskCache {
+    _diskCacheInfo = [[NSMutableDictionary alloc] initWithContentsOfFile:[_diskCachePath stringByAppendingPathComponent:kAFURLCacheInfoFileName]];
+    if (!_diskCacheInfo) {
+        _diskCacheInfo = [[NSMutableDictionary alloc] initWithObjectsAndKeys:
+                          [NSNumber numberWithUnsignedInt:0], kAFURLCacheInfoDiskUsageKey,
+                          [NSMutableDictionary dictionary], kAFURLCacheInfoAccessesKey,
+                          [NSMutableDictionary dictionary], kAFURLCacheInfoSizesKey,
+                          nil];
+    }
+    _diskCacheInfoDirty = NO;
+    _diskCacheUsage = [[_diskCacheInfo objectForKey:kAFURLCacheInfoDiskUsageKey] unsignedIntValue];
 }
 
 /*
@@ -253,25 +263,6 @@ static dispatch_queue_t get_disk_io_queue() {
     return [[[NSDate alloc] initWithTimeInterval:kAFURLCacheDefault sinceDate:now] autorelease];
 }
 
-- (NSMutableDictionary *)diskCacheInfo {
-    
-    dispatch_once(&diskCacheOnceToken, ^{
-        _diskCacheInfo = [[NSMutableDictionary alloc] initWithContentsOfFile:[_diskCachePath stringByAppendingPathComponent:kAFURLCacheInfoFileName]];
-        if (!_diskCacheInfo) {
-            _diskCacheInfo = [[NSMutableDictionary alloc] initWithObjectsAndKeys:
-                              [NSNumber numberWithUnsignedInt:0], kAFURLCacheInfoDiskUsageKey,
-                              [NSMutableDictionary dictionary], kAFURLCacheInfoAccessesKey,
-                              [NSMutableDictionary dictionary], kAFURLCacheInfoSizesKey,
-                              nil];
-        }
-        _diskCacheInfoDirty = NO;
-        _diskCacheUsage = [[_diskCacheInfo objectForKey:kAFURLCacheInfoDiskUsageKey] unsignedIntValue];
-        
-    });
-    
-    return _diskCacheInfo;
-}
-
 - (void)createDiskCachePath {
     static dispatch_once_t onceToken;
     dispatch_once(&onceToken, ^{
@@ -380,7 +371,7 @@ static dispatch_queue_t get_disk_io_queue() {
         // start timer for cleanup (rely on fact that dispatch_suspend syncs with disk cache queue)
         if (_timerPaused) {
             _timerPaused = NO;
-            dispatch_resume([self maintenanceTimer]);
+            dispatch_resume(_maintenanceTimer);
         }
     });
 }
@@ -526,6 +517,15 @@ static dispatch_queue_t get_disk_io_queue() {
 }
 
 #pragma mark NSObject
+
+- (id)init {
+    self = [super init];
+    if(self) {
+        [self createMaintenanceTimer];
+        [self createDiskCache];
+    }
+    return self;
+}
 
 - (void)dealloc {
     dispatch_source_cancel(_maintenanceTimer);
