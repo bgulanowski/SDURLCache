@@ -3,10 +3,11 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 45;
+	objectVersion = 46;
 	objects = {
 
 /* Begin PBXBuildFile section */
+		4E6037C714573A2F009214A2 /* NULevelDB.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4E6037C614573A2F009214A2 /* NULevelDB.framework */; };
 		53F557F4114EA63600A3DA4B /* SDURLCache.h in Headers */ = {isa = PBXBuildFile; fileRef = 53F557F2114EA63600A3DA4B /* SDURLCache.h */; };
 		53F557F5114EA63600A3DA4B /* SDURLCache.m in Sources */ = {isa = PBXBuildFile; fileRef = 53F557F3114EA63600A3DA4B /* SDURLCache.m */; };
 		53F5592C114F1ED800A3DA4B /* SDURLCacheTests.m in Sources */ = {isa = PBXBuildFile; fileRef = 53F5592B114F1ED800A3DA4B /* SDURLCacheTests.m */; };
@@ -25,6 +26,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		4E6037C614573A2F009214A2 /* NULevelDB.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = NULevelDB.framework; sourceTree = "<group>"; };
 		53F557F2114EA63600A3DA4B /* SDURLCache.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SDURLCache.h; sourceTree = "<group>"; };
 		53F557F3114EA63600A3DA4B /* SDURLCache.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SDURLCache.m; sourceTree = "<group>"; };
 		53F5591C114F1D5E00A3DA4B /* SDURLCacheTestBundle.octest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SDURLCacheTestBundle.octest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -47,6 +49,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				4E6037C714573A2F009214A2 /* NULevelDB.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -77,6 +80,7 @@
 		0867D69AFE84028FC02AAC07 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				4E6037C614573A2F009214A2 /* NULevelDB.framework */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
