@@ -92,33 +92,6 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 #pragma mark SDURLCache (private)
 
-static dispatch_queue_t get_date_formatter_queue() {
-    static dispatch_queue_t _dateFormatterQueue;
-    static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		_dateFormatterQueue = dispatch_queue_create("sdurlcache.dateformatter", NULL);
-	});
-	return _dateFormatterQueue;
-}
-
-static dispatch_queue_t get_disk_cache_queue() {
-    static dispatch_once_t onceToken;
-    static dispatch_queue_t _diskCacheQueue;
-	dispatch_once(&onceToken, ^{
-		_diskCacheQueue = dispatch_queue_create("sdurlcache.processing", NULL);
-	});
-	return _diskCacheQueue;
-}
-
-static dispatch_queue_t get_disk_io_queue() {
-    static dispatch_queue_t _diskIOQueue;
-    static dispatch_once_t onceToken;
-	dispatch_once(&onceToken, ^{
-		_diskIOQueue = dispatch_queue_create("sdurlcache.io", NULL);
-	});
-	return _diskIOQueue;
-}
-
 - (void)createMaintenanceTimer {
     dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
     _maintenanceTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
@@ -130,7 +103,7 @@ static dispatch_queue_t get_disk_io_queue() {
             [blockSelf periodicMaintenance];
             
             // will abuse cache queue to lock timer
-            dispatch_async(get_disk_cache_queue(), ^{
+            dispatch_async(_diskCacheQueue, ^{
                 dispatch_suspend(_maintenanceTimer); // pause timer
                 _timerPaused = YES;
             });            
@@ -153,22 +126,29 @@ static dispatch_queue_t get_disk_io_queue() {
     _diskCacheUsage = [[_diskCacheInfo objectForKey:kAFURLCacheInfoDiskUsageKey] unsignedIntValue];
 }
 
+- (void)createDispatchQueues {
+    _diskCacheQueue = dispatch_queue_create("sdurlcache.processing", NULL);
+    _diskIOQueue = dispatch_queue_create("sdurlcache.io", NULL);
+}
+
 /*
  * Parse HTTP Date: http://www.w3.org/Protocols/rfc2616/rfc2616-sec3.html#sec3.3.1
  */
 + (NSDate *)dateFromHttpDateString:(NSString *)httpDate {
     static dispatch_once_t onceToken;
+    static dispatch_queue_t _dateFormatterQueue;
     static NSDateFormatter *_FC1123DateFormatter;
     static NSDateFormatter *_ANSICDateFormatter;
     static NSDateFormatter *_RFC850DateFormatter;
     dispatch_once(&onceToken, ^{
+        _dateFormatterQueue = dispatch_queue_create("sdurlcache.dateformatter", NULL);
         _FC1123DateFormatter = CreateDateFormatter(@"EEE, dd MMM yyyy HH:mm:ss z");
         _ANSICDateFormatter = CreateDateFormatter(@"EEE MMM d HH:mm:ss yyyy");
         _RFC850DateFormatter = CreateDateFormatter(@"EEEE, dd-MMM-yy HH:mm:ss z");
     });
     
     __block NSDate *date = nil;
-    dispatch_sync(get_date_formatter_queue(), ^{
+    dispatch_sync(_dateFormatterQueue, ^{
         date = [_FC1123DateFormatter dateFromString:httpDate];
         if (!date) {
             // ANSI C date format - Sun Nov  6 08:49:37 1994
@@ -279,7 +259,7 @@ static dispatch_queue_t get_disk_io_queue() {
 
 - (void)saveCacheInfo {
     [self createDiskCachePath];
-    dispatch_async(get_disk_cache_queue(), ^{
+    dispatch_async(_diskCacheQueue, ^{
         NSData *data = [NSPropertyListSerialization dataFromPropertyList:self.diskCacheInfo format:NSPropertyListBinaryFormat_v1_0 errorDescription:NULL];
         if (data) {
             [data writeToFile:[_diskCachePath stringByAppendingPathComponent:kAFURLCacheInfoFileName] atomically:YES];
@@ -290,7 +270,7 @@ static dispatch_queue_t get_disk_io_queue() {
 }
 
 - (void)removeCachedResponseForCachedKeys:(NSArray *)cacheKeys {
-    dispatch_async(get_disk_cache_queue(), ^{
+    dispatch_async(_diskCacheQueue, ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
         
         NSEnumerator *enumerator = [cacheKeys objectEnumerator];
@@ -319,7 +299,7 @@ static dispatch_queue_t get_disk_io_queue() {
         return; // Already done
     }
     
-    dispatch_async(get_disk_cache_queue(), ^{
+    dispatch_async(_diskCacheQueue, ^{
         NSMutableArray *keysToRemove = [NSMutableArray array];
         
         // Apply LRU cache eviction algorithm while disk usage outreach capacity
@@ -358,7 +338,7 @@ static dispatch_queue_t get_disk_io_queue() {
     NSNumber *cacheItemSize = [[fileManager attributesOfItemAtPath:cacheFilePath error:NULL] objectForKey:NSFileSize];
     [fileManager release];
     
-    dispatch_async(get_disk_cache_queue(), ^{
+    dispatch_async(_diskCacheQueue, ^{
         _diskCacheUsage += [cacheItemSize unsignedIntegerValue];
         [self.diskCacheInfo setObject:[NSNumber numberWithUnsignedInteger:_diskCacheUsage] forKey:kAFURLCacheInfoDiskUsageKey];
         
@@ -376,15 +356,14 @@ static dispatch_queue_t get_disk_io_queue() {
     });
 }
 
-// called in NSTimer
 - (void)periodicMaintenance {
     if (_diskCacheUsage > self.diskCapacity) {
-        dispatch_async(get_disk_io_queue(), ^{
+        dispatch_async(_diskIOQueue, ^{
             [self balanceDiskUsage];
         });
     }
     else if (_diskCacheInfoDirty) {
-        dispatch_async(get_disk_io_queue(), ^{
+        dispatch_async(_diskIOQueue, ^{
             [self saveCacheInfo];
         });
     }
@@ -438,7 +417,7 @@ static dispatch_queue_t get_disk_io_queue() {
             }
         }
         
-        dispatch_async(get_disk_io_queue(), ^{
+        dispatch_async(_diskIOQueue, ^{
             [self storeRequestToDisk:request response:cachedResponse];
         });
     }
@@ -457,7 +436,7 @@ static dispatch_queue_t get_disk_io_queue() {
     // NOTE: We don't handle expiration here as even staled cache data is necessary for NSURLConnection to handle cache revalidation.
     //       Staled cache data is also needed for cachePolicies which force the use of the cache.
     __block NSCachedURLResponse *response = nil;
-    dispatch_sync(get_disk_cache_queue(), ^{
+    dispatch_sync(_diskCacheQueue, ^{
         NSMutableDictionary *accesses = [self.diskCacheInfo objectForKey:kAFURLCacheInfoAccessesKey];
         if ([accesses objectForKey:cacheKey]) { // OPTI: Check for cache-hit in a in-memory dictionnary before to hit the FS
             response = [NSKeyedUnarchiver unarchiveObjectWithFile:[_diskCachePath stringByAppendingPathComponent:cacheKey]];
@@ -497,7 +476,7 @@ static dispatch_queue_t get_disk_io_queue() {
     [super removeAllCachedResponses];
     NSFileManager *fileManager = [[[NSFileManager alloc] init] autorelease];
     [fileManager removeItemAtPath:_diskCachePath error:NULL];
-    dispatch_async(get_disk_cache_queue(), ^{
+    dispatch_async(_diskCacheQueue, ^{
         self.diskCacheInfo = nil;
     });
 }
@@ -521,15 +500,22 @@ static dispatch_queue_t get_disk_io_queue() {
 - (id)init {
     self = [super init];
     if(self) {
-        [self createMaintenanceTimer];
         [self createDiskCache];
+        [self createMaintenanceTimer];
+        [self createDispatchQueues];
     }
     return self;
 }
 
 - (void)dealloc {
-    dispatch_source_cancel(_maintenanceTimer);
-    dispatch_release(_maintenanceTimer);
+    if(NULL != _maintenanceTimer) {
+        dispatch_source_cancel(_maintenanceTimer);
+        dispatch_release(_maintenanceTimer), _maintenanceTimer = NULL;
+    }
+    if(NULL != _diskCacheQueue)
+        dispatch_release(_diskCacheQueue), _diskCacheQueue = NULL;
+    if(NULL != _diskIOQueue)
+        dispatch_release(_diskIOQueue), _diskIOQueue = NULL;
     [_diskCachePath release], _diskCachePath = nil;
     [_diskCacheInfo release], _diskCacheInfo = nil;
     [super dealloc];
