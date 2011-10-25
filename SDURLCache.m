@@ -266,25 +266,20 @@ static dispatch_queue_t get_disk_io_queue() {
 }
 
 - (NSMutableDictionary *)diskCacheInfo {
-    if (!_diskCacheInfo) {
-        dispatch_sync_afreentrant(get_disk_cache_queue(), ^{
-            if (!_diskCacheInfo) { // Check again, maybe another thread created it while waiting for the mutex
-                _diskCacheInfo = [[NSMutableDictionary alloc] initWithContentsOfFile:[_diskCachePath stringByAppendingPathComponent:kAFURLCacheInfoFileName]];
-                if (!_diskCacheInfo) {
-                    _diskCacheInfo = [[NSMutableDictionary alloc] initWithObjectsAndKeys:
-                                      [NSNumber numberWithUnsignedInt:0], kAFURLCacheInfoDiskUsageKey,
-                                      [NSMutableDictionary dictionary], kAFURLCacheInfoAccessesKey,
-                                      [NSMutableDictionary dictionary], kAFURLCacheInfoSizesKey,
-                                      nil];
-                }
-                _diskCacheInfoDirty = NO;
-                _diskCacheUsage = [[_diskCacheInfo objectForKey:kAFURLCacheInfoDiskUsageKey] unsignedIntValue];
-                
-                // create maintenance timer
-                [self maintenanceTimer];
-            }
-        });
-    }
+    
+    dispatch_once(&diskCacheOnceToken, ^{
+        _diskCacheInfo = [[NSMutableDictionary alloc] initWithContentsOfFile:[_diskCachePath stringByAppendingPathComponent:kAFURLCacheInfoFileName]];
+        if (!_diskCacheInfo) {
+            _diskCacheInfo = [[NSMutableDictionary alloc] initWithObjectsAndKeys:
+                              [NSNumber numberWithUnsignedInt:0], kAFURLCacheInfoDiskUsageKey,
+                              [NSMutableDictionary dictionary], kAFURLCacheInfoAccessesKey,
+                              [NSMutableDictionary dictionary], kAFURLCacheInfoSizesKey,
+                              nil];
+        }
+        _diskCacheInfoDirty = NO;
+        _diskCacheUsage = [[_diskCacheInfo objectForKey:kAFURLCacheInfoDiskUsageKey] unsignedIntValue];
+        
+    });
     
     return _diskCacheInfo;
 }
