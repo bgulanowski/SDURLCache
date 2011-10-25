@@ -120,8 +120,7 @@ static dispatch_queue_t get_disk_io_queue() {
 }
 
 - (dispatch_source_t)maintenanceTimer {
-    static dispatch_once_t onceToken;
-    dispatch_once(&onceToken, ^{
+    dispatch_once(&timerOnceToken, ^{
         dispatch_queue_t queue = dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0);
         _maintenanceTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, queue);
         if (_maintenanceTimer) {

@@ -17,7 +17,8 @@
 
     dispatch_source_t _maintenanceTimer;
     dispatch_once_t diskCacheOnceToken;
-
+    dispatch_once_t timerOnceToken;
+    
     NSTimeInterval _minCacheInterval;
     NSUInteger _diskCacheUsage;
 
