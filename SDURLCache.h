@@ -2,7 +2,6 @@
 //  SDURLCache.h
 //  SDURLCache
 // Copyright (c) 2010-2011 Olivier Poitrey <rs@dailymotion.com>
-// Modernized to use GCD by Peter Steinberger <steipete@gmail.com>
 //
 //  Created by Olivier Poitrey on 15/03/10.
 //  Copyright 2010 Dailymotion. All rights reserved.

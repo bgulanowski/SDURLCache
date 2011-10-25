@@ -1,7 +1,6 @@
 // SDURLCache.m
 //
 // Copyright (c) 2010-2011 Olivier Poitrey <rs@dailymotion.com>
-// Modernized to use GCD by Peter Steinberger <steipete@gmail.com>
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -61,16 +60,6 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 @end
 
-// deadlock-free variant of dispatch_sync
-void dispatch_sync_afreentrant(dispatch_queue_t queue, dispatch_block_t block);
-inline void dispatch_sync_afreentrant(dispatch_queue_t queue, dispatch_block_t block) {
-    dispatch_get_current_queue() == queue ? block() : dispatch_sync(queue, block);
-}
-
-void dispatch_async_afreentrant(dispatch_queue_t queue, dispatch_block_t block);
-inline void dispatch_async_afreentrant(dispatch_queue_t queue, dispatch_block_t block) {
-	dispatch_get_current_queue() == queue ? block() : dispatch_async(queue, block);
-}
 
 @interface SDURLCache ()
 @property (nonatomic, retain) NSString *diskCachePath;
@@ -107,7 +96,7 @@ static dispatch_queue_t get_date_formatter_queue() {
     static dispatch_queue_t _dateFormatterQueue;
     static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^{
-		_dateFormatterQueue = dispatch_queue_create("com.petersteinberger.disk-cache.dateformatter", NULL);
+		_dateFormatterQueue = dispatch_queue_create("sdurlcache.dateformatter", NULL);
 	});
 	return _dateFormatterQueue;
 }
@@ -116,7 +105,7 @@ static dispatch_queue_t get_disk_cache_queue() {
     static dispatch_once_t onceToken;
     static dispatch_queue_t _diskCacheQueue;
 	dispatch_once(&onceToken, ^{
-		_diskCacheQueue = dispatch_queue_create("com.petersteinberger.disk-cache.processing", NULL);
+		_diskCacheQueue = dispatch_queue_create("sdurlcache.processing", NULL);
 	});
 	return _diskCacheQueue;
 }
@@ -125,7 +114,7 @@ static dispatch_queue_t get_disk_io_queue() {
     static dispatch_queue_t _diskIOQueue;
     static dispatch_once_t onceToken;
 	dispatch_once(&onceToken, ^{
-		_diskIOQueue = dispatch_queue_create("com.petersteinberger.disk-cache.io", NULL);
+		_diskIOQueue = dispatch_queue_create("sdurlcache.io", NULL);
 	});
 	return _diskIOQueue;
 }
@@ -143,7 +132,7 @@ static dispatch_queue_t get_disk_io_queue() {
                 [blockSelf periodicMaintenance];
                 
                 // will abuse cache queue to lock timer
-                dispatch_async_afreentrant(get_disk_cache_queue(), ^{
+                dispatch_async(get_disk_cache_queue(), ^{
                     dispatch_suspend(_maintenanceTimer); // pause timer
                     _timerPaused = YES;
                 });            
@@ -300,7 +289,7 @@ static dispatch_queue_t get_disk_io_queue() {
 
 - (void)saveCacheInfo {
     [self createDiskCachePath];
-    dispatch_async_afreentrant(get_disk_cache_queue(), ^{
+    dispatch_async(get_disk_cache_queue(), ^{
         NSData *data = [NSPropertyListSerialization dataFromPropertyList:self.diskCacheInfo format:NSPropertyListBinaryFormat_v1_0 errorDescription:NULL];
         if (data) {
             [data writeToFile:[_diskCachePath stringByAppendingPathComponent:kAFURLCacheInfoFileName] atomically:YES];
@@ -311,7 +300,7 @@ static dispatch_queue_t get_disk_io_queue() {
 }
 
 - (void)removeCachedResponseForCachedKeys:(NSArray *)cacheKeys {
-    dispatch_async_afreentrant(get_disk_cache_queue(), ^{
+    dispatch_async(get_disk_cache_queue(), ^{
         NSAutoreleasePool *pool = [[NSAutoreleasePool alloc] init];
         
         NSEnumerator *enumerator = [cacheKeys objectEnumerator];
@@ -340,7 +329,7 @@ static dispatch_queue_t get_disk_io_queue() {
         return; // Already done
     }
     
-    dispatch_async_afreentrant(get_disk_cache_queue(), ^{
+    dispatch_async(get_disk_cache_queue(), ^{
         NSMutableArray *keysToRemove = [NSMutableArray array];
         
         // Apply LRU cache eviction algorithm while disk usage outreach capacity
@@ -379,7 +368,7 @@ static dispatch_queue_t get_disk_io_queue() {
     NSNumber *cacheItemSize = [[fileManager attributesOfItemAtPath:cacheFilePath error:NULL] objectForKey:NSFileSize];
     [fileManager release];
     
-    dispatch_async_afreentrant(get_disk_cache_queue(), ^{
+    dispatch_async(get_disk_cache_queue(), ^{
         _diskCacheUsage += [cacheItemSize unsignedIntegerValue];
         [self.diskCacheInfo setObject:[NSNumber numberWithUnsignedInteger:_diskCacheUsage] forKey:kAFURLCacheInfoDiskUsageKey];
         
@@ -518,7 +507,7 @@ static dispatch_queue_t get_disk_io_queue() {
     [super removeAllCachedResponses];
     NSFileManager *fileManager = [[[NSFileManager alloc] init] autorelease];
     [fileManager removeItemAtPath:_diskCachePath error:NULL];
-    dispatch_async_afreentrant(get_disk_cache_queue(), ^{
+    dispatch_async(get_disk_cache_queue(), ^{
         self.diskCacheInfo = nil;
     });
 }
