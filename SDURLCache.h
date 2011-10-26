@@ -9,23 +9,22 @@
 
 #import <Foundation/Foundation.h>
 
+
+@class NULDBDB;
+
 @interface SDURLCache : NSURLCache
 {
 @private
-    NSMutableDictionary *_diskCacheInfo;
+    NULDBDB *db;
+    
     NSString *_diskCachePath;
 
     dispatch_queue_t _diskCacheQueue;
     dispatch_queue_t _diskIOQueue;
     
-    dispatch_source_t _maintenanceTimer;
-    
     NSTimeInterval _minCacheInterval;
-    NSUInteger _diskCacheUsage;
 
-    BOOL _diskCacheInfoDirty;
     BOOL _ignoreMemoryOnlyStoragePolicy;
-    BOOL _timerPaused;
 }
 
 /*
