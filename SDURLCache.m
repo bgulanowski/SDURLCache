@@ -74,18 +74,18 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 
 @interface NSCachedURLResponse (SDURLCacheAdditions)
-- (BOOL)isExpired:(NSTimeInterval)cacheInterval;
+- (BOOL)isExpired;
 @end
 
 @implementation NSCachedURLResponse (SDURLCacheAdditions)
 
-- (BOOL)isExpired:(NSTimeInterval)cacheLimit {
+- (BOOL)isExpired {
     
     NSHTTPURLResponse *urlResponse = (NSHTTPURLResponse *)self.response;
     NSDictionary *headers = [urlResponse allHeaderFields];
     NSDate *expirationDate = [SDURLCache expirationDateFromHeaders:headers withStatusCode:urlResponse.statusCode];
         
-    return [expirationDate timeIntervalSinceNow] - cacheLimit <= 0;
+    return [expirationDate timeIntervalSinceNow] <= 0;
 }
 
 @end
@@ -93,19 +93,17 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 @interface SDURLCacheMaintenance : NSObject {
     NSString *cursor;
-    NSTimeInterval limit;
     BOOL paused;
     BOOL stop;
 }
 
 @property (retain) NSString *cursor;
-@property (readwrite) NSTimeInterval limit;
 @property (readwrite) BOOL paused;
 @property (readwrite) BOOL stop;
 @end
 
 @implementation SDURLCacheMaintenance
-@synthesize cursor, limit, paused, stop;
+@synthesize cursor, paused, stop;
 - (void)dealloc {
     self.cursor = nil;
     [super dealloc];
@@ -272,7 +270,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         
         if(![response isKindOfClass:[NSCachedURLResponse class]]) return YES;
         
-        if([response isExpired:maintenance.limit]) {
+        if([response isExpired]) {
             NSLog(@"Evicting '%@' for being too old.", response.response.URL);
             NSError *error = nil;
             if(![cacheDB deleteStoredDataForKey:key error:&error])
@@ -300,7 +298,6 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     
     self.maintenance = [[[SDURLCacheMaintenance alloc] init] autorelease];
     self.maintenance.cursor = kSDURLCacheMaintenanceSmallestKey;
-    self.maintenance.limit = _minCacheInterval;
 
     _maintenanceTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _maintenanceQueue);
     
