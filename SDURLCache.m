@@ -234,7 +234,6 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
         _minCacheInterval = kAFURLCacheInfoDefaultMinCacheInterval;
         _ignoreMemoryOnlyStoragePolicy = YES;
         _diskCacheQueue = dispatch_queue_create("sdurlcache.processing", NULL);
-        _diskIOQueue = dispatch_queue_create("sdurlcache.io", NULL);
         self.diskCachePath = path;
         db = [[NULDBDB alloc] initWithLocation:path];
 	}
@@ -341,8 +340,6 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 - (void)dealloc {
     if(NULL != _diskCacheQueue)
         dispatch_release(_diskCacheQueue), _diskCacheQueue = NULL;
-    if(NULL != _diskIOQueue)
-        dispatch_release(_diskIOQueue), _diskIOQueue = NULL;
     [_diskCachePath release], _diskCachePath = nil;
     [db release], db = nil;
     [super dealloc];
