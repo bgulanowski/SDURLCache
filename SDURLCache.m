@@ -25,7 +25,7 @@
 #import <CommonCrypto/CommonDigest.h>
 
 #define kAFURLCachePath @"SDNetworkingURLCache"
-#define kAFURLCacheMaintenanceTime 5ull
+#define kAFURLCacheMaintenanceTime 120ull
 
 static NSTimeInterval const kAFURLCacheInfoDefaultMinCacheInterval = 5 * 60; // 5 minute
 
@@ -293,7 +293,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     if(!interrupted)
         maintenance.cursor = kSDURLCacheMaintenanceSmallestKey;
     
-    NSLog(@"Finished maintenance with key '%@'", interrupted ? maintenance.cursor : kSDURLCacheMaintenanceTerminalKey);
+    NSLog(@"Finished maintenance with key '%@' (checked %u keys)", interrupted ? maintenance.cursor : kSDURLCacheMaintenanceTerminalKey, interruptCheckCounter);
 }
 
 - (void)initializeMaintenance {
@@ -308,9 +308,6 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         dispatch_source_set_timer(_maintenanceTimer, dispatch_walltime(DISPATCH_TIME_NOW, kAFURLCacheMaintenanceTime * NSEC_PER_SEC), 
                                   kAFURLCacheMaintenanceTime * NSEC_PER_SEC, kAFURLCacheMaintenanceTime/2 * NSEC_PER_SEC);
 
-        // By putting the db into the block, not self, we avoid a retain cycle
-        NULDBDB *cacheDB = db;
-
         dispatch_source_set_event_handler(_maintenanceTimer, ^{
             
             dispatch_async(dispatch_get_main_queue(), ^{
@@ -318,7 +315,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
                 maintenance.paused = YES;
             });
             
-            SDMaintainCache(cacheDB, maintenance);
+            SDMaintainCache(db, maintenance);
         });
         
         // initially wake up timer
