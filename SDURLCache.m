@@ -74,16 +74,19 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 
 @interface NSCachedURLResponse (SDURLCacheAdditions)
-- (BOOL)isExpired;
+- (BOOL)isExpired:(NSDate **)expiration;
 @end
 
 @implementation NSCachedURLResponse (SDURLCacheAdditions)
 
-- (BOOL)isExpired {
+- (BOOL)isExpired:(NSDate **)expiration {
     
     NSHTTPURLResponse *urlResponse = (NSHTTPURLResponse *)self.response;
     NSDictionary *headers = [urlResponse allHeaderFields];
     NSDate *expirationDate = [SDURLCache expirationDateFromHeaders:headers withStatusCode:urlResponse.statusCode];
+    
+    if(expiration)
+        *expiration = expirationDate;
         
     return [expirationDate timeIntervalSinceNow] <= 0;
 }
@@ -91,23 +94,73 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 @end
 
 
+@interface NULDBDB (SDURLCacheAdditions)
+
+- (BOOL)storeUnsignedInteger:(NSUInteger)value forKey:(NSString *)key error:(NSError **)error;
+- (NSUInteger)unsignedIntegerForKey:(NSString *)key error:(NSError **)error;
+- (BOOL)storeCachedURLResponse:(NSCachedURLResponse *)cachedResponse forKey:(NSString *)key error:(NSError **)error;
+- (NSCachedURLResponse *)cachedURLResponseForKey:(NSString *)key error:(NSError **)error;
+
+@end
+
+@implementation NULDBDB (SDURLCacheAdditions)
+
+- (BOOL)storeUnsignedInteger:(NSUInteger)value forKey:(NSString *)key error:(NSError **)error {
+    return [self storeData:[NSKeyedArchiver archivedDataWithRootObject:[NSNumber numberWithUnsignedInteger:value]] forKey:key error:error];
+}
+
+- (NSUInteger)unsignedIntegerForKey:(NSString *)key error:(NSError **)error {
+    return [[NSKeyedUnarchiver unarchiveObjectWithData:[self storedDataForKey:key error:NULL]] unsignedIntegerValue];
+}
+
+- (BOOL)storeCachedURLResponse:(NSCachedURLResponse *)cachedResponse forKey:(NSString *)key error:(NSError **)error {
+    return [self storeData:[NSKeyedArchiver archivedDataWithRootObject:cachedResponse] forKey:key error:error];
+}
+
+- (NSCachedURLResponse *)cachedURLResponseForKey:(NSString *)key error:(NSError **)error {
+    return [NSKeyedUnarchiver unarchiveObjectWithData:[self storedDataForKey:key error:error]];
+}
+
+@end
+
+
 @interface SDURLCacheMaintenance : NSObject {
     NSString *cursor;
+    NSUInteger size;
+    NSUInteger sizeLimit;
     BOOL paused;
     BOOL stop;
 }
 
 @property (retain) NSString *cursor;
+@property (readwrite) NSUInteger size;
+@property (readwrite) NSUInteger sizeLimit;
 @property (readwrite) BOOL paused;
 @property (readwrite) BOOL stop;
 @end
 
 @implementation SDURLCacheMaintenance
-@synthesize cursor, paused, stop;
+@synthesize cursor, size, sizeLimit, paused, stop;
 - (void)dealloc {
     self.cursor = nil;
     [super dealloc];
 }
+@end
+
+
+@interface SDURLResponseUsageInfo : NSObject {
+    NSString *key;
+    NSDate *expiry;
+@public
+    NSUInteger size;
+}
+@property (nonatomic, retain) NSString *key;
+@property (nonatomic, retain) NSDate *expiry;
+@end
+
+
+@implementation SDURLResponseUsageInfo
+@synthesize key, expiry;
 @end
 
 
@@ -251,6 +304,36 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 }
 
 
+static inline void SDDeleteCacheEntry(SDURLCacheMaintenance *maintenance, NULDBDB *cacheDB, NSString *key) {
+    
+    NSUInteger used = 0;
+    
+    if(maintenance.sizeLimit > 0)
+        used = [cacheDB sizeUsedByKey:key];
+ 
+    NSError *error = nil;
+    if(![cacheDB deleteStoredDataForKey:key error:&error])
+        NSLog(@"Error deleting key '%@': %@", key, error);
+    else
+        maintenance.size = (maintenance.size > used) ? maintenance.size - used : 0;
+    
+    if(maintenance.sizeLimit > 0)
+        [cacheDB storeUnsignedInteger:maintenance.size forKey:kSDURLCacheDiskUsageKey error:NULL];
+}
+
+static inline void SDInsertEntry(SDURLCacheMaintenance *maintenance, NULDBDB *cacheDB, NSString *key, NSCachedURLResponse *resonse) {
+    
+    NSError *error = nil;
+    
+    if(![cacheDB storeCachedURLResponse:resonse forKey:key error:&error])
+        NSLog(@"Error storing response: %@", error);
+    else if(maintenance.sizeLimit > 0)
+        maintenance.size += [cacheDB sizeUsedByKey:key];
+    
+    if(maintenance.sizeLimit > 0)
+        [cacheDB storeUnsignedInteger:maintenance.size forKey:kSDURLCacheDiskUsageKey error:NULL];
+}
+
 #define INTERRUPT_CHECK_INTERVAL 128
 
 static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance) {
@@ -259,8 +342,11 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     
     __block BOOL interrupted = NO;
     __block NSUInteger interruptCheckCounter = 0;
+    NSUInteger sizeOverage = maintenance.size > maintenance.sizeLimit ? maintenance.size - maintenance.sizeLimit : 0;
+    NSMutableArray *evictionCandidates = maintenance.sizeLimit > 0 ? [NSMutableArray arrayWithCapacity:128] : nil;
+    __block NSUInteger candidatesTotalSize = 0;
     
-    BOOL(^block)(NSString *key, NSData *value) = ^BOOL(NSString *key, NSData *value){
+    BOOL(^block)(NSString *key, NSData *value) = ^BOOL(NSString *key, NSData *value) {
         
         // Quick way to tell the key doesn't refer to a cached response
         if([key length] != 32) return YES;
@@ -270,11 +356,45 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         
         if(![response isKindOfClass:[NSCachedURLResponse class]]) return YES;
         
-        if([response isExpired]) {
+        
+        NSDate *expiration = nil;
+        
+        if([response isExpired:&expiration]) {
             NSLog(@"Evicting '%@' for being too old.", response.response.URL);
-            NSError *error = nil;
-            if(![cacheDB deleteStoredDataForKey:key error:&error])
-                NSLog(@"Error deleting key '%@': %@", key, error);
+            SDDeleteCacheEntry(maintenance, cacheDB, key);
+        }
+        else if(sizeOverage > 0 && nil != expiration) {
+            
+            SDURLResponseUsageInfo *usageInfo = [[SDURLResponseUsageInfo alloc] init];
+            
+            usageInfo.key = key;
+            usageInfo.expiry = expiration;
+
+            // If the index is low, this is an old object; if it's high (close to [evictionCandidates count], this is a new object
+            NSUInteger index = [evictionCandidates indexOfObject:usageInfo
+                                                   inSortedRange:NSMakeRange(0, [evictionCandidates count])
+                                                         options:NSBinarySearchingFirstEqual|NSBinarySearchingInsertionIndex
+                                                 usingComparator:^(SDURLResponseUsageInfo *obj1, SDURLResponseUsageInfo *obj2) {
+                                                     return [obj1.expiry compare:obj2.expiry];
+                                                 }];
+            
+            // if the index is last AND we don't need more space, skip this guy
+            if(index < [evictionCandidates count] || candidatesTotalSize < sizeOverage) {
+                
+                candidatesTotalSize += usageInfo->size = [cacheDB sizeUsedByKey:key];
+
+                [evictionCandidates insertObject:usageInfo atIndex:index];
+                
+                if(candidatesTotalSize > sizeOverage) {
+                    
+                    SDURLResponseUsageInfo *pardoned = [evictionCandidates lastObject];
+                    
+                    [evictionCandidates removeLastObject];
+                    candidatesTotalSize -= pardoned->size;
+                }
+            }
+            
+            [usageInfo release];
         }
         
         if(0 == interruptCheckCounter++%INTERRUPT_CHECK_INTERVAL && maintenance.stop) {
@@ -298,6 +418,10 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     
     self.maintenance = [[[SDURLCacheMaintenance alloc] init] autorelease];
     self.maintenance.cursor = kSDURLCacheMaintenanceSmallestKey;
+    self.maintenance.sizeLimit = self.diskCapacity;
+    
+    if(self.diskCapacity > 0)
+        self.maintenance.size = [db unsignedIntegerForKey:kSDURLCacheDiskUsageKey error:NULL];
 
     _maintenanceTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _maintenanceQueue);
     
@@ -323,17 +447,12 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
 - (void)storeRequestToDisk:(NSURLRequest *)request response:(__block NSCachedURLResponse *)cachedResponse {
     
     dispatch_async(_diskCacheQueue, ^{
+
+        SDInsertEntry(maintenance, db, [SDURLCache cacheKeyForURL:request.URL], cachedResponse);
         
-        NSString *cacheKey = [SDURLCache cacheKeyForURL:request.URL];
-        NSData *data = [NSKeyedArchiver archivedDataWithRootObject:cachedResponse];
-        NSError *error = nil;
-        
-        if(![db storeData:data forKey:cacheKey error:&error])
-            NSLog(@"Error storing response: %@", error);
-        
-        if(self.maintenance.paused) {
+        if(maintenance.paused) {
             dispatch_resume(_maintenanceTimer);
-            self.maintenance.paused = NO;
+            maintenance.paused = NO;
         }
     });
 }
@@ -360,14 +479,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         self.diskCachePath = path;
         
         db = [[NULDBDB alloc] initWithLocation:path];
-        
-        NSError *error = nil;
-        NSData *data = [NSKeyedArchiver archivedDataWithRootObject:[NSNumber numberWithUnsignedInteger:diskCapacity]];
-        
-        if(![db storeData:data forKey:kSDURLCacheDiskUsageKey error:&error]) {
-            NSLog(@"NULevelDB error inserting key '%@': %@", kSDURLCacheDiskUsageKey, error);
-        }
-        
+                
         [self initializeMaintenance];
 	}
     
@@ -423,11 +535,8 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         NSString *cacheKey = [SDURLCache cacheKeyForURL:request.URL];
         NSError *error = nil;
         
-        NSData *data = [db storedDataForKey:cacheKey error:&error];
-        
-        if(nil != data)
-            response = [NSKeyedUnarchiver unarchiveObjectWithData:data];
-        else if(nil != error)
+        response = [db cachedURLResponseForKey:cacheKey error:&error];
+        if(nil == response && nil != error)
             NSLog(@"Error storing data for key '%@': %@", cacheKey, error);
         
         if (nil != response)
@@ -443,11 +552,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     [super removeCachedResponseForRequest:request];
 
     dispatch_async(_diskCacheQueue, ^{
-
-        NSError *error = nil;
-
-        if(![db deleteStoredDataForKey:[SDURLCache cacheKeyForURL:request.URL] error:&error])
-            NSLog(@"Error deleting cached value: %@", error);
+        SDDeleteCacheEntry(maintenance, db, [SDURLCache cacheKeyForURL:request.URL]);
     });
 }
 
@@ -456,18 +561,15 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     [db destroy];
     [db release];
     db = [[NULDBDB alloc] initWithLocation:self.diskCachePath];
+    self.maintenance = [[[SDURLCacheMaintenance alloc] init] autorelease];
 }
 
 - (BOOL)isCached:(NSURL *)url {
-    NSURLRequest *request = [NSURLRequest requestWithURL:url];
-    request = [SDURLCache canonicalRequestForRequest:request];
     
-    if ([super cachedResponseForRequest:request]) {
+    if ([super cachedResponseForRequest:[SDURLCache canonicalRequestForRequest:[NSURLRequest requestWithURL:url]]])
         return YES;
-    }
-    NSString *cacheKey = [SDURLCache cacheKeyForURL:url];
     
-    return [db storedDataExistsForKey:cacheKey];
+    return [db storedDataExistsForKey:[SDURLCache cacheKeyForURL:url]];
 }
 
 #pragma mark NSObject
