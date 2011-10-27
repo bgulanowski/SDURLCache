@@ -265,7 +265,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     BOOL(^block)(NSString *key, NSData *value) = ^BOOL(NSString *key, NSData *value){
         
         // Quick way to tell the key doesn't refer to a cached response
-        if([key length] != 16) return YES;
+        if([key length] != 32) return YES;
         
         
         NSCachedURLResponse *response = [NSKeyedUnarchiver unarchiveObjectWithData:value];
