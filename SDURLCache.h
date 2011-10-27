@@ -2,7 +2,6 @@
 //  SDURLCache.h
 //  SDURLCache
 // Copyright (c) 2010-2011 Olivier Poitrey <rs@dailymotion.com>
-// Modernized to use GCD by Peter Steinberger <steipete@gmail.com>
 //
 //  Created by Olivier Poitrey on 15/03/10.
 //  Copyright 2010 Dailymotion. All rights reserved.
@@ -10,19 +9,26 @@
 
 #import <Foundation/Foundation.h>
 
+
+@class SDURLCacheMaintenance;
+@class NULDBDB;
+
 @interface SDURLCache : NSURLCache
 {
-    @private
-    dispatch_queue_t _diskCacheQueue;
-    dispatch_queue_t _dateFormatterQueue;
+@private
+    SDURLCacheMaintenance *maintenance;
+    
+    NULDBDB *db;
+    
     NSString *_diskCachePath;
-    NSMutableDictionary *_diskCacheInfo;
-    BOOL _diskCacheInfoDirty;
-    BOOL _ignoreMemoryOnlyStoragePolicy;
-    NSUInteger _diskCacheUsage;
-    NSTimeInterval _minCacheInterval;
+
+    dispatch_queue_t _diskCacheQueue;
+    dispatch_queue_t _maintenanceQueue;
     dispatch_source_t _maintenanceTimer;
-    BOOL _timerPaused;
+    
+    NSTimeInterval _minCacheInterval;
+
+    BOOL _ignoreMemoryOnlyStoragePolicy;
 }
 
 /*
