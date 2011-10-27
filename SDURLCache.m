@@ -253,22 +253,35 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 }
 
 
-void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance) {
-    
 #define INTERRUPT_CHECK_INTERVAL 128
-    __block NSUInteger interruptCheckCounter = 0;
+
+static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance) {
+    
+    NSLog(@"Started maintenance with key '%@'", maintenance.cursor);
+    
     __block BOOL interrupted = NO;
+    __block NSUInteger interruptCheckCounter = 0;
     
     BOOL(^block)(NSString *key, NSData *value) = ^BOOL(NSString *key, NSData *value){
         
+        // Quick way to tell the key doesn't refer to a cached response
+        if([key length] != 16) return YES;
+        
+        
         NSCachedURLResponse *response = [NSKeyedUnarchiver unarchiveObjectWithData:value];
         
-        if([response isExpired:maintenance.limit])
-            [cacheDB deleteStoredDataForKey:key error:NULL];
+        if(![response isKindOfClass:[NSCachedURLResponse class]]) return YES;
+        
+        if([response isExpired:maintenance.limit]) {
+            NSLog(@"Evicting '%@' for being too old.", response.response.URL);
+            NSError *error = nil;
+            if(![cacheDB deleteStoredDataForKey:key error:&error])
+                NSLog(@"Error deleting key '%@': %@", key, error);
+        }
         
         if(0 == interruptCheckCounter++%INTERRUPT_CHECK_INTERVAL && maintenance.stop) {
-            maintenance.cursor = key;
             interrupted = YES;
+            maintenance.cursor = key;
             return NO;
         }
         
@@ -276,6 +289,11 @@ void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance) {
     };
     
     [cacheDB iterateFromKey:maintenance.cursor toKey:kSDURLCacheMaintenanceTerminalKey block:block];
+    
+    if(!interrupted)
+        maintenance.cursor = kSDURLCacheMaintenanceSmallestKey;
+    
+    NSLog(@"Finished maintenance with key '%@'", interrupted ? maintenance.cursor : kSDURLCacheMaintenanceTerminalKey);
 }
 
 - (void)initializeMaintenance {
