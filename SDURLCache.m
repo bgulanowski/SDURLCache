@@ -28,10 +28,12 @@
 #define kAFURLCacheMaintenanceTime 5ull
 
 static NSTimeInterval const kAFURLCacheInfoDefaultMinCacheInterval = 5 * 60; // 5 minute
-static NSString *const kAFURLCacheInfoFileName = @"cacheInfo.plist";
-static NSString *const kAFURLCacheInfoDiskUsageKey = @"diskUsage";
-static NSString *const kAFURLCacheInfoAccessesKey = @"accesses";
-static NSString *const kAFURLCacheInfoSizesKey = @"sizes";
+
+static NSString *kSDURLCacheDiskUsageKey = @"SDURLCache:capacity";
+
+static NSString *kSDURLCacheMaintenanceSmallestKey = @"0000000000000000";
+static NSString *kSDURLCacheMaintenanceTerminalKey = @"g";
+
 static float const kAFURLCacheLastModFraction = 0.1f; // 10% since Last-Modified suggested by RFC2616 section 13.2.4
 static float const kAFURLCacheDefault = 3600; // Default cache expiration delay if none defined (1 hour)
 
@@ -42,6 +44,7 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
     [dateFormatter setDateFormat:format];
     return dateFormatter;
 }
+
 
 @implementation NSCachedURLResponse(NSCoder)
 
@@ -64,9 +67,55 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 @interface SDURLCache ()
 @property (nonatomic, retain) NSString *diskCachePath;
+@property (retain) SDURLCacheMaintenance *maintenance;
++ (NSDate *)expirationDateFromHeaders:(NSDictionary *)headers withStatusCode:(NSInteger)status;
+- (void)initializeMaintenance;
 @end
 
+
+@interface NSCachedURLResponse (SDURLCacheAdditions)
+- (BOOL)isExpired:(NSTimeInterval)cacheInterval;
+@end
+
+@implementation NSCachedURLResponse (SDURLCacheAdditions)
+
+- (BOOL)isExpired:(NSTimeInterval)cacheLimit {
+    
+    NSHTTPURLResponse *urlResponse = (NSHTTPURLResponse *)self.response;
+    NSDictionary *headers = [urlResponse allHeaderFields];
+    NSDate *expirationDate = [SDURLCache expirationDateFromHeaders:headers withStatusCode:urlResponse.statusCode];
+        
+    return [expirationDate timeIntervalSinceNow] - cacheLimit <= 0;
+}
+
+@end
+
+
+@interface SDURLCacheMaintenance : NSObject {
+    NSString *cursor;
+    NSTimeInterval limit;
+    BOOL paused;
+    BOOL stop;
+}
+
+@property (retain) NSString *cursor;
+@property (readwrite) NSTimeInterval limit;
+@property (readwrite) BOOL paused;
+@property (readwrite) BOOL stop;
+@end
+
+@implementation SDURLCacheMaintenance
+@synthesize cursor, limit, paused, stop;
+- (void)dealloc {
+    self.cursor = nil;
+    [super dealloc];
+}
+@end
+
+
 @implementation SDURLCache
+
+@synthesize maintenance;
 
 #pragma mark SDURLCache (tools)
 
@@ -203,6 +252,62 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
     return [[[NSDate alloc] initWithTimeInterval:kAFURLCacheDefault sinceDate:now] autorelease];
 }
 
+
+void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance) {
+    
+#define INTERRUPT_CHECK_INTERVAL 128
+    __block NSUInteger interruptCheckCounter = 0;
+    __block BOOL interrupted = NO;
+    
+    BOOL(^block)(NSString *key, NSData *value) = ^BOOL(NSString *key, NSData *value){
+        
+        NSCachedURLResponse *response = [NSKeyedUnarchiver unarchiveObjectWithData:value];
+        
+        if([response isExpired:maintenance.limit])
+            [cacheDB deleteStoredDataForKey:key error:NULL];
+        
+        if(0 == interruptCheckCounter++%INTERRUPT_CHECK_INTERVAL && maintenance.stop) {
+            maintenance.cursor = key;
+            interrupted = YES;
+            return NO;
+        }
+        
+        return YES;
+    };
+    
+    [cacheDB iterateFromKey:maintenance.cursor toKey:kSDURLCacheMaintenanceTerminalKey block:block];
+}
+
+- (void)initializeMaintenance {
+    
+    self.maintenance = [[[SDURLCacheMaintenance alloc] init] autorelease];
+    self.maintenance.cursor = kSDURLCacheMaintenanceSmallestKey;
+    self.maintenance.limit = _minCacheInterval;
+
+    _maintenanceTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _maintenanceQueue);
+    
+    if (_maintenanceTimer) {
+        dispatch_source_set_timer(_maintenanceTimer, dispatch_walltime(DISPATCH_TIME_NOW, kAFURLCacheMaintenanceTime * NSEC_PER_SEC), 
+                                  kAFURLCacheMaintenanceTime * NSEC_PER_SEC, kAFURLCacheMaintenanceTime/2 * NSEC_PER_SEC);
+
+        // By putting the db into the block, not self, we avoid a retain cycle
+        NULDBDB *cacheDB = db;
+
+        dispatch_source_set_event_handler(_maintenanceTimer, ^{
+            
+            dispatch_async(dispatch_get_main_queue(), ^{
+                dispatch_suspend(_maintenanceTimer); // pause timer
+                maintenance.paused = YES;
+            });
+            
+            SDMaintainCache(cacheDB, maintenance);
+        });
+        
+        // initially wake up timer
+        dispatch_resume(_maintenanceTimer);
+    }
+}
+
 - (void)storeRequestToDisk:(NSURLRequest *)request response:(__block NSCachedURLResponse *)cachedResponse {
     
     dispatch_async(_diskCacheQueue, ^{
@@ -213,6 +318,11 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
         
         if(![db storeData:data forKey:cacheKey error:&error])
             NSLog(@"Error storing response: %@", error);
+        
+        if(self.maintenance.paused) {
+            dispatch_resume(_maintenanceTimer);
+            self.maintenance.paused = NO;
+        }
     });
 }
 
@@ -231,11 +341,22 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
     self = [super initWithMemoryCapacity:memoryCapacity diskCapacity:diskCapacity diskPath:path];
     
     if (self) {
+        
         _minCacheInterval = kAFURLCacheInfoDefaultMinCacheInterval;
         _ignoreMemoryOnlyStoragePolicy = YES;
         _diskCacheQueue = dispatch_queue_create("sdurlcache.processing", NULL);
         self.diskCachePath = path;
+        
         db = [[NULDBDB alloc] initWithLocation:path];
+        
+        NSError *error = nil;
+        NSData *data = [NSKeyedArchiver archivedDataWithRootObject:[NSNumber numberWithUnsignedInteger:diskCapacity]];
+        
+        if(![db storeData:data forKey:kSDURLCacheDiskUsageKey error:&error]) {
+            NSLog(@"NULevelDB error inserting key '%@': %@", kSDURLCacheDiskUsageKey, error);
+        }
+        
+        [self initializeMaintenance];
 	}
     
     return self;
@@ -294,6 +415,8 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
         
         if(nil != data)
             response = [NSKeyedUnarchiver unarchiveObjectWithData:data];
+        else if(nil != error)
+            NSLog(@"Error storing data for key '%@': %@", cacheKey, error);
         
         if (nil != response)
             [super storeCachedResponse:response forRequest:request];
@@ -338,6 +461,14 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 #pragma mark NSObject
 
 - (void)dealloc {
+    self.maintenance.stop = YES;
+    self.maintenance = nil;
+    if(NULL != _maintenanceTimer) {
+        dispatch_source_cancel(_maintenanceTimer);
+        dispatch_release(_maintenanceTimer), _maintenanceTimer = NULL;
+    }
+    if(NULL != _maintenanceQueue)
+        dispatch_release(_maintenanceQueue), _diskCacheQueue = NULL;
     if(NULL != _diskCacheQueue)
         dispatch_release(_diskCacheQueue), _diskCacheQueue = NULL;
     [_diskCachePath release], _diskCachePath = nil;

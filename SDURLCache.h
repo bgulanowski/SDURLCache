@@ -10,16 +10,21 @@
 #import <Foundation/Foundation.h>
 
 
+@class SDURLCacheMaintenance;
 @class NULDBDB;
 
 @interface SDURLCache : NSURLCache
 {
 @private
+    SDURLCacheMaintenance *maintenance;
+    
     NULDBDB *db;
     
     NSString *_diskCachePath;
 
     dispatch_queue_t _diskCacheQueue;
+    dispatch_queue_t _maintenanceQueue;
+    dispatch_source_t _maintenanceTimer;
     
     NSTimeInterval _minCacheInterval;
 
