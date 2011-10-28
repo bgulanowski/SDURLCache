@@ -26,7 +26,7 @@
 
 
 #define kAFURLCachePath @"SDNetworkingURLCache"
-#define kAFURLCacheMaintenanceTime 120ull
+#define kAFURLCacheMaintenanceTime 10ull
 
 static NSTimeInterval const kAFURLCacheInfoDefaultMinCacheInterval = 5 * 60; // 5 minute
 
@@ -113,7 +113,10 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 }
 
 - (NSUInteger)unsignedIntegerForKey:(NSString *)key error:(NSError **)error {
-    return [[NSKeyedUnarchiver unarchiveObjectWithData:[self storedDataForKey:key error:NULL]] unsignedIntegerValue];
+    NSData *data = [self storedDataForKey:key error:NULL];
+    if(nil == data)
+        return 0;
+    return [[NSKeyedUnarchiver unarchiveObjectWithData:data] unsignedIntegerValue];
 }
 
 - (BOOL)storeCachedURLResponse:(NSCachedURLResponse *)cachedResponse forKey:(NSString *)key error:(NSError **)error {
@@ -121,7 +124,10 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 }
 
 - (NSCachedURLResponse *)cachedURLResponseForKey:(NSString *)key error:(NSError **)error {
-    return [NSKeyedUnarchiver unarchiveObjectWithData:[self storedDataForKey:key error:error]];
+    NSData *data = [self storedDataForKey:key error:error];
+    if(nil == data)
+        return nil;
+    return [NSKeyedUnarchiver unarchiveObjectWithData:data];
 }
 
 @end
@@ -132,16 +138,18 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
     NSUInteger size;
     NSUInteger sizeLimit;
     BOOL paused;
+    BOOL stop;
 }
 
 @property (retain) NSString *cursor;
 @property (readwrite) NSUInteger size;
 @property (readwrite) NSUInteger sizeLimit;
 @property (readwrite) BOOL paused;
+@property (readwrite) BOOL stop;
 @end
 
 @implementation SDURLCacheMaintenance
-@synthesize cursor, size, sizeLimit, paused;
+@synthesize cursor, size, sizeLimit, paused, stop;
 - (void)dealloc {
     self.cursor = nil;
     [super dealloc];
@@ -172,6 +180,7 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
     _offline = flag;
     if(flag)
         [self pauseMaintenance];
+    maintenance.stop = flag;
 }
 
 
@@ -192,7 +201,7 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
     const char *str = [url.absoluteString UTF8String];
     unsigned char r[CC_MD5_DIGEST_LENGTH];
     CC_MD5(str, strlen(str), r);
-    return [NSString stringWithFormat:@"MD5:%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+    return [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
             r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15]];
 }
 
@@ -362,7 +371,6 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         NSCachedURLResponse *response = [NSKeyedUnarchiver unarchiveObjectWithData:value];
         
         if(![response isKindOfClass:[NSCachedURLResponse class]]) return YES;
-        if(maintenance.paused) return NO;
         
         NSDate *expiration = nil;
         
@@ -406,7 +414,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         
         ++counter;
         
-        if(maintenance.paused) {
+        if(maintenance.stop) {
             maintenance.cursor = key;
             return NO;
         }
@@ -416,10 +424,10 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     
     [cacheDB iterateFromKey:maintenance.cursor toKey:kSDURLCacheMaintenanceTerminalKey block:block];
     
-    if(!maintenance.paused)
+    if(!maintenance.stop)
         maintenance.cursor = kSDURLCacheMaintenanceSmallestKey;
     
-    NSLog(@"Finished maintenance with key '%@' (checked %u keys)", maintenance.paused ? maintenance.cursor : kSDURLCacheMaintenanceTerminalKey, counter);
+    NSLog(@"Finished maintenance with key '%@' (checked %u keys)", maintenance.stop ? maintenance.cursor : kSDURLCacheMaintenanceTerminalKey, counter);
 }
 
 - (void)initializeMaintenance {
@@ -600,7 +608,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
 #pragma mark NSObject
 
 - (void)dealloc {
-    self.maintenance.paused = YES;
+    self.maintenance.stop = YES;
     self.maintenance = nil;
     if(NULL != _maintenanceTimer) {
         dispatch_source_cancel(_maintenanceTimer);
