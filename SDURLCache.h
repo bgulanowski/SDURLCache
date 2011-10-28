@@ -29,6 +29,7 @@
     NSTimeInterval _minCacheInterval;
 
     BOOL _ignoreMemoryOnlyStoragePolicy;
+    BOOL _offline;
 }
 
 /*
@@ -48,6 +49,8 @@
  * The default value is YES
  */
 @property (nonatomic, assign) BOOL ignoreMemoryOnlyStoragePolicy;
+
+@property (nonatomic, getter = isOffline) BOOL offline;
 
 /*
  * Returns a default cache director path to be used at cache initialization. The generated path directory

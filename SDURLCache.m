@@ -24,6 +24,7 @@
 #import <NULevelDB/NULDBDB.h>
 #import <CommonCrypto/CommonDigest.h>
 
+
 #define kAFURLCachePath @"SDNetworkingURLCache"
 #define kAFURLCacheMaintenanceTime 120ull
 
@@ -70,6 +71,8 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 @property (retain) SDURLCacheMaintenance *maintenance;
 + (NSDate *)expirationDateFromHeaders:(NSDictionary *)headers withStatusCode:(NSInteger)status;
 - (void)initializeMaintenance;
+- (void)pauseMaintenance;
+- (void)resumeMaintenance;
 @end
 
 
@@ -129,18 +132,16 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
     NSUInteger size;
     NSUInteger sizeLimit;
     BOOL paused;
-    BOOL stop;
 }
 
 @property (retain) NSString *cursor;
 @property (readwrite) NSUInteger size;
 @property (readwrite) NSUInteger sizeLimit;
 @property (readwrite) BOOL paused;
-@property (readwrite) BOOL stop;
 @end
 
 @implementation SDURLCacheMaintenance
-@synthesize cursor, size, sizeLimit, paused, stop;
+@synthesize cursor, size, sizeLimit, paused;
 - (void)dealloc {
     self.cursor = nil;
     [super dealloc];
@@ -166,7 +167,13 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 @implementation SDURLCache
 
-@synthesize maintenance;
+#pragma mark - Accessors
+- (void)setOffline:(BOOL)flag {
+    _offline = flag;
+    if(flag)
+        [self pauseMaintenance];
+}
+
 
 #pragma mark SDURLCache (tools)
 
@@ -185,9 +192,10 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
     const char *str = [url.absoluteString UTF8String];
     unsigned char r[CC_MD5_DIGEST_LENGTH];
     CC_MD5(str, strlen(str), r);
-    return [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
+    return [NSString stringWithFormat:@"MD5:%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
             r[0], r[1], r[2], r[3], r[4], r[5], r[6], r[7], r[8], r[9], r[10], r[11], r[12], r[13], r[14], r[15]];
 }
+
 
 #pragma mark SDURLCache (private)
 
@@ -340,11 +348,10 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     
     NSLog(@"Started maintenance with key '%@'", maintenance.cursor);
     
-    __block BOOL interrupted = NO;
-    __block NSUInteger interruptCheckCounter = 0;
     NSUInteger sizeOverage = maintenance.size > maintenance.sizeLimit ? maintenance.size - maintenance.sizeLimit : 0;
     NSMutableArray *evictionCandidates = maintenance.sizeLimit > 0 ? [NSMutableArray arrayWithCapacity:128] : nil;
     __block NSUInteger candidatesTotalSize = 0;
+    __block NSUInteger counter = 0;
     
     BOOL(^block)(NSString *key, NSData *value) = ^BOOL(NSString *key, NSData *value) {
         
@@ -355,7 +362,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         NSCachedURLResponse *response = [NSKeyedUnarchiver unarchiveObjectWithData:value];
         
         if(![response isKindOfClass:[NSCachedURLResponse class]]) return YES;
-        
+        if(maintenance.paused) return NO;
         
         NSDate *expiration = nil;
         
@@ -397,8 +404,9 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
             [usageInfo release];
         }
         
-        if(0 == interruptCheckCounter++%INTERRUPT_CHECK_INTERVAL && maintenance.stop) {
-            interrupted = YES;
+        ++counter;
+        
+        if(maintenance.paused) {
             maintenance.cursor = key;
             return NO;
         }
@@ -408,10 +416,10 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     
     [cacheDB iterateFromKey:maintenance.cursor toKey:kSDURLCacheMaintenanceTerminalKey block:block];
     
-    if(!interrupted)
+    if(!maintenance.paused)
         maintenance.cursor = kSDURLCacheMaintenanceSmallestKey;
     
-    NSLog(@"Finished maintenance with key '%@' (checked %u keys)", interrupted ? maintenance.cursor : kSDURLCacheMaintenanceTerminalKey, interruptCheckCounter);
+    NSLog(@"Finished maintenance with key '%@' (checked %u keys)", maintenance.paused ? maintenance.cursor : kSDURLCacheMaintenanceTerminalKey, counter);
 }
 
 - (void)initializeMaintenance {
@@ -430,12 +438,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
                                   kAFURLCacheMaintenanceTime * NSEC_PER_SEC, kAFURLCacheMaintenanceTime/2 * NSEC_PER_SEC);
 
         dispatch_source_set_event_handler(_maintenanceTimer, ^{
-            
-            dispatch_async(dispatch_get_main_queue(), ^{
-                dispatch_suspend(_maintenanceTimer); // pause timer
-                maintenance.paused = YES;
-            });
-            
+            [self pauseMaintenance];
             SDMaintainCache(db, maintenance);
         });
         
@@ -444,16 +447,33 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     }
 }
 
+- (void)pauseMaintenance {
+    dispatch_async(dispatch_get_main_queue(), ^{
+
+        if(maintenance.paused) return;
+        
+        dispatch_suspend(_maintenanceTimer);
+        maintenance.paused = YES;
+    });
+}
+
+- (void)resumeMaintenance {
+    dispatch_async(dispatch_get_main_queue(), ^{
+
+        if(!maintenance.paused) return;
+        
+        dispatch_resume(_maintenanceTimer);
+        maintenance.paused = NO;
+    });
+}
+
 - (void)storeRequestToDisk:(NSURLRequest *)request response:(__block NSCachedURLResponse *)cachedResponse {
     
     dispatch_async(_diskCacheQueue, ^{
 
         SDInsertEntry(maintenance, db, [SDURLCache cacheKeyForURL:request.URL], cachedResponse);
         
-        if(maintenance.paused) {
-            dispatch_resume(_maintenanceTimer);
-            maintenance.paused = NO;
-        }
+        if(!_offline) [self resumeMaintenance];
     });
 }
 
@@ -539,6 +559,11 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         if(nil == response && nil != error)
             NSLog(@"Error storing data for key '%@': %@", cacheKey, error);
         
+        if(!self.offline && [response isExpired:NULL]) {
+            SDDeleteCacheEntry(maintenance, db, cacheKey);
+            response = nil;
+        }
+        
         if (nil != response)
             [super storeCachedResponse:response forRequest:request];
     }
@@ -575,7 +600,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
 #pragma mark NSObject
 
 - (void)dealloc {
-    self.maintenance.stop = YES;
+    self.maintenance.paused = YES;
     self.maintenance = nil;
     if(NULL != _maintenanceTimer) {
         dispatch_source_cancel(_maintenanceTimer);
@@ -590,8 +615,10 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     [super dealloc];
 }
 
+@synthesize maintenance;
 @synthesize minCacheInterval = _minCacheInterval;
 @synthesize ignoreMemoryOnlyStoragePolicy = _ignoreMemoryOnlyStoragePolicy;
 @synthesize diskCachePath = _diskCachePath;
+@synthesize offline = _offline;
 
 @end
