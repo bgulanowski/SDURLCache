@@ -506,7 +506,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         _diskCacheQueue = dispatch_queue_create("sdurlcache.processing", NULL);
         self.diskCachePath = path;
         
-        db = [[NULDBDB alloc] initWithLocation:path];
+        db = [[NULDBDB alloc] initWithLocation:path bufferSize:diskCapacity > 1<<24 ? 1<<22 : diskCapacity / 4];
                 
         [self initializeMaintenance];
 	}
