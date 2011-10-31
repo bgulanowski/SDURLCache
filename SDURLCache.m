@@ -355,7 +355,7 @@ static inline void SDInsertEntry(SDURLCacheMaintenance *maintenance, NULDBDB *ca
 
 static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance) {
     
-    NSLog(@"Started maintenance with key '%@'", maintenance.cursor);
+    NSLog(@"Started maintenance with key '%@'. Estimated cache size: %u bytes (versus %u bytes on disk).", maintenance.cursor, maintenance.size, [cacheDB currentSizeEstimate]);
     
     NSUInteger sizeOverage = maintenance.size > maintenance.sizeLimit ? maintenance.size - maintenance.sizeLimit : 0;
     NSMutableArray *evictionCandidates = maintenance.sizeLimit > 0 ? [NSMutableArray arrayWithCapacity:128] : nil;
@@ -394,9 +394,11 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
                                                  }];
             
             // if the index is last AND we don't need more space, skip this guy
-            if(index < [evictionCandidates count] || candidatesTotalSize < sizeOverage) {
+            NSUInteger entrySize = [cacheDB sizeUsedByKey:key];
+            
+            if(entrySize > 0 && (index < [evictionCandidates count] || candidatesTotalSize < sizeOverage)) {
                 
-                candidatesTotalSize += usageInfo->size = [cacheDB sizeUsedByKey:key];
+                candidatesTotalSize += usageInfo->size = entrySize;
 
                 [evictionCandidates insertObject:usageInfo atIndex:index];
                 
@@ -423,6 +425,17 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     };
     
     [cacheDB iterateFromKey:maintenance.cursor toKey:kSDURLCacheMaintenanceTerminalKey block:block];
+    
+    if([evictionCandidates count]) {
+        
+        NSUInteger oldSize = maintenance.size;
+        NSUInteger newSize = oldSize > candidatesTotalSize ? oldSize - candidatesTotalSize : 0;
+        
+        NSLog(@"Deleting %d entries to reduce cache size (was %u bytes; will be %u bytes)", [evictionCandidates count], oldSize, newSize);
+        maintenance.size = newSize;
+        [cacheDB deleteStoredStringsForKeys:[evictionCandidates valueForKey:@"key"] error:NULL];
+        [cacheDB storeUnsignedInteger:maintenance.size forKey:kSDURLCacheDiskUsageKey error:NULL];
+    }
     
     if(!maintenance.stop)
         maintenance.cursor = kSDURLCacheMaintenanceSmallestKey;
