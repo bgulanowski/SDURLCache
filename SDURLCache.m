@@ -99,11 +99,7 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 @interface NULDBDB (SDURLCacheAdditions)
 
-//- (BOOL)storeUnsignedInteger:(NSUInteger)value forKey:(NSString *)key error:(NSError **)error;
-//- (NSUInteger)unsignedIntegerForKey:(NSString *)key error:(NSError **)error;
-- (BOOL)storeCachedURLResponse:(NSCachedURLResponse *)cachedResponse forKey:(NSString *)key error:(NSError **)error;
 - (void)storeCachedURLResponse:(NSCachedURLResponse *)cachedResponse forKey:(NSString *)key;
-- (NSCachedURLResponse *)cachedURLResponseForKey:(NSString *)key error:(NSError **)error;
 - (NSCachedURLResponse *)cachedURLResponseForKey:(NSString *)key;
 - (void)deleteCachedURLResponseForKey:(NSString *)key;
 
@@ -111,39 +107,52 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 @implementation NULDBDB (SDURLCacheAdditions)
 
-//- (BOOL)storeUnsignedInteger:(NSUInteger)value forKey:(NSString *)key error:(NSError **)error {
-//    return [self storeData:[NSKeyedArchiver archivedDataWithRootObject:[NSNumber numberWithUnsignedInteger:value]] forKey:key error:error];
-//}
-//
-//- (NSUInteger)unsignedIntegerForKey:(NSString *)key error:(NSError **)error {
-//    NSData *data = [self storedDataForKey:key error:NULL];
-//    if(nil == data)
-//        return 0;
-//    return [[NSKeyedUnarchiver unarchiveObjectWithData:data] unsignedIntegerValue];
-//}
-
-- (BOOL)storeCachedURLResponse:(NSCachedURLResponse *)cachedResponse forKey:(NSString *)key error:(NSError **)error {
-    return [self storeData:[NSKeyedArchiver archivedDataWithRootObject:cachedResponse] forKey:key error:error];
-}
+#define SDURLLastModifiedKeyForCacheKey(_key_) ([NSString stringWithFormat:@"$SDURLLastModified:%@", _key_])
 
 - (void)storeCachedURLResponse:(NSCachedURLResponse *)cachedResponse forKey:(NSString *)key {
-    NSError *error = nil;    
+    
+    NSError *error = nil;
+    NSString *lastModifiedKey = SDURLLastModifiedKeyForCacheKey(key);
+    
+    if(![self storeData:[NSKeyedArchiver archivedDataWithRootObject:[NSDate date]] forKey:lastModifiedKey error:&error])
+        NSLog(@"Error storing last modified key '%@': %@", lastModifiedKey, error);
+    
+    error = nil;
     if(![self storeData:[NSKeyedArchiver archivedDataWithRootObject:cachedResponse] forKey:key error:&error])
         NSLog(@"Error storing cached URL response for key '%@': %@", key, error);
 }
 
-- (NSCachedURLResponse *)cachedURLResponseForKey:(NSString *)key error:(NSError **)error {
-    NSData *data = [self storedDataForKey:key error:error];
-    if(nil == data) return nil;
+
+- (NSCachedURLResponse *)cachedURLResponseForKey:(NSString *)key {
+    
+    NSError *error = nil;
+    NSData *data = [self storedDataForKey:key error:&error];
+
+    if(nil == data) {
+        if( nil != error)
+            NSLog(@"Error storing data for key '%@': %@", key, error);
+        return nil;
+    }
+
+    NSString *lastModifiedKey = SDURLLastModifiedKeyForCacheKey(key);
+
+    if(![self storeData:[NSKeyedArchiver archivedDataWithRootObject:[NSDate date]] forKey:lastModifiedKey error:&error])
+        NSLog(@"Error storing last modified key '%@': %@", lastModifiedKey, error);
+    
+    error = nil;
+
     return [NSKeyedUnarchiver unarchiveObjectWithData:data];
 }
 
-- (NSCachedURLResponse *)cachedURLResponseForKey:(NSString *)key {
-    return nil;
-}
-
 - (void)deleteCachedURLResponseForKey:(NSString *)key {
+    
     NSError *error = nil;    
+    NSString *lastModifiedKey = SDURLLastModifiedKeyForCacheKey(key);
+    
+    if(![self deleteStoredDataForKey:lastModifiedKey error:&error])
+        NSLog(@"Error deleting last modified key '%@': %@", lastModifiedKey, error);
+
+    error = nil;
     if(![self deleteStoredDataForKey:key error:&error])
         NSLog(@"Error deleting cached URL response for key '%@': %@", key, error);   
 }
@@ -181,17 +190,17 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 @interface SDURLResponseUsageInfo : NSObject {
     NSString *key;
-    NSDate *expiry;
+    NSDate *lastModified;
 @public
     NSUInteger size;
 }
 @property (nonatomic, retain) NSString *key;
-@property (nonatomic, retain) NSDate *expiry;
+@property (nonatomic, retain) NSDate *lastModified;
 @end
 
 
 @implementation SDURLResponseUsageInfo
-@synthesize key, expiry;
+@synthesize key, lastModified;
 @end
 
 
@@ -368,25 +377,26 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         
         if(![response isKindOfClass:[NSCachedURLResponse class]]) return YES;
         
-        NSDate *expiration = nil;
+        NSData *lmdata = [cacheDB storedDataForKey:SDURLLastModifiedKeyForCacheKey(key) error:NULL];
+        NSDate *lastModified = lmdata ? [NSKeyedUnarchiver unarchiveObjectWithData:lmdata] : nil;
         
-        if([response isExpired:&expiration]) {
+        if([response isExpired:NULL]) {
             NSLog(@"Evicting '%@' for being too old.", response.response.URL);
             [cacheDB deleteCachedURLResponseForKey:key];
         }
-        else if(sizeOverage > 0 && nil != expiration) {
+        else if(sizeOverage > 0 && nil != lastModified) {
             
             SDURLResponseUsageInfo *usageInfo = [[SDURLResponseUsageInfo alloc] init];
             
             usageInfo.key = key;
-            usageInfo.expiry = expiration;
+            usageInfo.lastModified = lastModified;
 
             // If the index is low, this is an old object; if it's high (close to [evictionCandidates count], this is a new object
             NSUInteger index = [evictionCandidates indexOfObject:usageInfo
                                                    inSortedRange:NSMakeRange(0, [evictionCandidates count])
                                                          options:NSBinarySearchingFirstEqual|NSBinarySearchingInsertionIndex
                                                  usingComparator:^(SDURLResponseUsageInfo *obj1, SDURLResponseUsageInfo *obj2) {
-                                                     return [obj1.expiry compare:obj2.expiry];
+                                                     return [obj1.lastModified compare:obj2.lastModified];
                                                  }];
             
             // if the index is last AND we don't need more space, skip this guy
@@ -571,11 +581,8 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     if (!response) {
         
         NSString *cacheKey = [SDURLCache cacheKeyForURL:request.URL];
-        NSError *error = nil;
-        
-        response = [db cachedURLResponseForKey:cacheKey error:&error];
-        if(nil == response && nil != error)
-            NSLog(@"Error storing data for key '%@': %@", cacheKey, error);
+
+        response = [db cachedURLResponseForKey:cacheKey];
         
         if(!self.offline && [response isExpired:NULL]) {
             [db deleteCachedURLResponseForKey:cacheKey];
