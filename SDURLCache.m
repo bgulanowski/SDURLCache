@@ -26,7 +26,7 @@
 
 
 #define kAFURLCachePath @"SDNetworkingURLCache"
-#define kAFURLCacheMaintenanceTime 10ull
+#define kAFURLCacheMaintenanceTime 20ull
 
 static NSTimeInterval const kAFURLCacheInfoDefaultMinCacheInterval = 5 * 60; // 5 minute
 
@@ -135,21 +135,19 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 @interface SDURLCacheMaintenance : NSObject {
     NSString *cursor;
-    NSUInteger size;
     NSUInteger sizeLimit;
     BOOL paused;
     BOOL stop;
 }
 
 @property (retain) NSString *cursor;
-@property (readwrite) NSUInteger size;
 @property (readwrite) NSUInteger sizeLimit;
 @property (readwrite) BOOL paused;
 @property (readwrite) BOOL stop;
 @end
 
 @implementation SDURLCacheMaintenance
-@synthesize cursor, size, sizeLimit, paused, stop;
+@synthesize cursor, sizeLimit, paused, stop;
 - (void)dealloc {
     self.cursor = nil;
     [super dealloc];
@@ -323,19 +321,10 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 static inline void SDDeleteCacheEntry(SDURLCacheMaintenance *maintenance, NULDBDB *cacheDB, NSString *key) {
     
-    NSUInteger used = 0;
-    
-    if(maintenance.sizeLimit > 0)
-        used = [cacheDB sizeUsedByKey:key];
- 
     NSError *error = nil;
+
     if(![cacheDB deleteStoredDataForKey:key error:&error])
         NSLog(@"Error deleting key '%@': %@", key, error);
-    else
-        maintenance.size = (maintenance.size > used) ? maintenance.size - used : 0;
-    
-    if(maintenance.sizeLimit > 0)
-        [cacheDB storeUnsignedInteger:maintenance.size forKey:kSDURLCacheDiskUsageKey error:NULL];
 }
 
 static inline void SDInsertEntry(SDURLCacheMaintenance *maintenance, NULDBDB *cacheDB, NSString *key, NSCachedURLResponse *resonse) {
@@ -344,24 +333,23 @@ static inline void SDInsertEntry(SDURLCacheMaintenance *maintenance, NULDBDB *ca
     
     if(![cacheDB storeCachedURLResponse:resonse forKey:key error:&error])
         NSLog(@"Error storing response: %@", error);
-    else if(maintenance.sizeLimit > 0)
-        maintenance.size += [cacheDB sizeUsedByKey:key];
-    
-    if(maintenance.sizeLimit > 0)
-        [cacheDB storeUnsignedInteger:maintenance.size forKey:kSDURLCacheDiskUsageKey error:NULL];
 }
 
 #define INTERRUPT_CHECK_INTERVAL 128
 
 static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance) {
     
-    NSLog(@"Started maintenance with key '%@'. Estimated cache size: %u bytes (versus %u bytes on disk).", maintenance.cursor, maintenance.size, [cacheDB currentSizeEstimate]);
-    
-    NSUInteger sizeOverage = maintenance.size > maintenance.sizeLimit ? maintenance.size - maintenance.sizeLimit : 0;
+    NSUInteger cacheSize = [cacheDB currentSizeEstimate];
+    NSUInteger sizeOverage = cacheSize > maintenance.sizeLimit ? cacheSize - maintenance.sizeLimit : 0;
     NSMutableArray *evictionCandidates = maintenance.sizeLimit > 0 ? [NSMutableArray arrayWithCapacity:128] : nil;
     __block NSUInteger candidatesTotalSize = 0;
     __block NSUInteger counter = 0;
     
+    if(cacheSize > 2 * maintenance.sizeLimit)
+        NSLog(@"Something weird happened");
+
+    NSLog(@"Started maintenance with key '%@'. Approximate cache size: %u bytes.", maintenance.cursor, cacheSize);
+
     BOOL(^block)(NSString *key, NSData *value) = ^BOOL(NSString *key, NSData *value) {
         
         // Quick way to tell the key doesn't refer to a cached response
@@ -428,13 +416,11 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     
     if([evictionCandidates count]) {
         
-        NSUInteger oldSize = maintenance.size;
+        NSUInteger oldSize = cacheSize;
         NSUInteger newSize = oldSize > candidatesTotalSize ? oldSize - candidatesTotalSize : 0;
         
         NSLog(@"Deleting %d entries to reduce cache size (was %u bytes; will be %u bytes)", [evictionCandidates count], oldSize, newSize);
-        maintenance.size = newSize;
         [cacheDB deleteStoredStringsForKeys:[evictionCandidates valueForKey:@"key"] error:NULL];
-        [cacheDB storeUnsignedInteger:maintenance.size forKey:kSDURLCacheDiskUsageKey error:NULL];
     }
     
     if(!maintenance.stop)
@@ -449,9 +435,6 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     self.maintenance.cursor = kSDURLCacheMaintenanceSmallestKey;
     self.maintenance.sizeLimit = self.diskCapacity;
     
-    if(self.diskCapacity > 0)
-        self.maintenance.size = [db unsignedIntegerForKey:kSDURLCacheDiskUsageKey error:NULL];
-
     _maintenanceTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _maintenanceQueue);
     
     if (_maintenanceTimer) {
@@ -466,6 +449,11 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         // initially wake up timer
         dispatch_resume(_maintenanceTimer);
     }
+    
+    // run the maintenance immediately
+    dispatch_async(_maintenanceQueue, ^{
+        SDMaintainCache(db, maintenance);
+    });
 }
 
 - (void)pauseMaintenance {
@@ -517,6 +505,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         _minCacheInterval = kAFURLCacheInfoDefaultMinCacheInterval;
         _ignoreMemoryOnlyStoragePolicy = YES;
         _diskCacheQueue = dispatch_queue_create("sdurlcache.processing", NULL);
+        _maintenanceQueue = dispatch_queue_create("sdurlcache.maintenance", NULL);
         self.diskCachePath = path;
         
         db = [[NULDBDB alloc] initWithLocation:path bufferSize:diskCapacity > 1<<24 ? 1<<22 : diskCapacity / 4];
