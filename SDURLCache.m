@@ -39,6 +39,11 @@ static NSString *kSDURLCacheMaintenanceTerminalKey = @"g";
 static float const kAFURLCacheLastModFraction = 0.1f; // 10% since Last-Modified suggested by RFC2616 section 13.2.4
 static float const kAFURLCacheDefault         = 3600; // Default cache expiration delay if none defined (1 hour)
 
+
+
+static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance);
+
+
 static NSDateFormatter* CreateDateFormatter(NSString *format) {
     NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
     [dateFormatter setLocale:[[[NSLocale alloc] initWithLocaleIdentifier:@"en_US"] autorelease]];
@@ -73,8 +78,6 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 + (NSDate *)expirationDateFromHeaders:(NSDictionary *)headers withStatusCode:(NSInteger)status;
 + (NSString *)cacheKeyForURL:(NSURL *)url;
 - (void)initializeMaintenance;
-- (void)pauseMaintenance;
-- (void)resumeMaintenance;
 @end
 
 
@@ -186,8 +189,16 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 @end
 
 
+#pragma mark - SDURLCacheMaintenance
 @interface SDURLCacheMaintenance : NSObject {
+    
+    NULDBDB *db;
+    
     NSString *cursor;
+
+    dispatch_queue_t _maintenanceQueue;
+    dispatch_source_t _maintenanceTimer;
+    
     NSUInteger sizeLimit;
     BOOL paused;
     BOOL stop;
@@ -197,14 +208,91 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 @property (readwrite) NSUInteger sizeLimit;
 @property (readwrite) BOOL paused;
 @property (readwrite) BOOL stop;
+
+- (void)pause;
+- (void)resume;
+- (void)stopMaintenanceQueue;
+
 @end
 
 @implementation SDURLCacheMaintenance
+
 @synthesize cursor, sizeLimit, paused, stop;
+
 - (void)dealloc {
+    [db release], db = nil;
     self.cursor = nil;
+    [self stopMaintenanceQueue];
     [super dealloc];
 }
+
+- (id)initWithDatabase:(NULDBDB *)database {
+    self = [super init];
+    if(self) {
+        db = [database retain];
+        _maintenanceQueue = dispatch_queue_create("sdurlcache.maintenance", NULL);
+        _maintenanceTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _maintenanceQueue);
+        
+        if (_maintenanceTimer) {
+            dispatch_source_set_timer(_maintenanceTimer, dispatch_walltime(DISPATCH_TIME_NOW, kAFURLCacheMaintenanceTime * NSEC_PER_SEC), 
+                                      kAFURLCacheMaintenanceTime * NSEC_PER_SEC, kAFURLCacheMaintenanceTime/2 * NSEC_PER_SEC);
+            
+            dispatch_source_set_event_handler(_maintenanceTimer, ^{ SDMaintainCache(db, self); });
+            
+            dispatch_resume(_maintenanceTimer);
+        }
+    }
+    
+    return self;
+}
+
+- (void)runNow {
+    dispatch_async(_maintenanceQueue, ^{ SDMaintainCache(db, self); });
+}
+
+- (void)pause {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        
+        if(self.paused) return;
+        
+        dispatch_suspend(_maintenanceTimer);
+        self.paused = YES;
+    });
+}
+
+- (void)resume {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        
+        if(!self.paused) return;
+        
+        dispatch_resume(_maintenanceTimer);
+        self.paused = NO;
+    });
+}
+
+- (void)stopMaintenanceQueue {
+    if(NULL != _maintenanceTimer) {
+        dispatch_source_cancel(_maintenanceTimer);
+        dispatch_release(_maintenanceTimer), _maintenanceTimer = NULL;
+    }
+    if(NULL != _maintenanceQueue)
+        dispatch_release(_maintenanceQueue), _maintenanceQueue = NULL;
+}
+
+- (void)synchronizeAndStop {
+    
+    self.stop = YES;
+    
+    dispatch_sync(_maintenanceQueue, ^{
+        NSLog(@"Maintenance is stopping.");
+        self.stop = NO;
+    });
+    
+    [self stopMaintenanceQueue];
+    
+    NSLog(@"Maintenance should be stopped.");
+}
+
 @end
 
 
@@ -224,13 +312,14 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 @end
 
 
+#pragma mark - SDURLCache
 @implementation SDURLCache
 
 #pragma mark - Accessors
 - (void)setOffline:(BOOL)flag {
     _offline = flag;
     if(flag)
-        [self pauseMaintenance];
+        [maintenance pause];
     maintenance.stop = flag;
 }
 
@@ -238,10 +327,14 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
     if(![_mainPageURL isEqual:aURL]) {
         [_mainPageURL release];
         _mainPageURL = [aURL retain];
-        if(_mainPageURL)
-            [db storeString:[[self class] cacheKeyForURL:_mainPageURL] forKey:kSDURLCacheMainPageURLKey error:NULL];
+        if(_mainPageURL) {
+            dispatch_async(_diskCacheQueue, ^{
+                [db storeString:[[self class] cacheKeyForURL:_mainPageURL] forKey:kSDURLCacheMainPageURLKey error:NULL];
+                [db deleteStoredDataForKey:[[self class] cacheKeyForURL:_mainPageURL] error:NULL];
+            });
+        }
         else
-            [db deleteStoredDataForKey:kSDURLCacheMainPageURLKey error:NULL];
+            dispatch_async(_diskCacheQueue, ^{ [db deleteStoredDataForKey:kSDURLCacheMainPageURLKey error:NULL]; });
     }
 }
 
@@ -399,11 +492,8 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     if (sizeOverage < maintenance.sizeLimit / 8)
         sizeOverage = 0;
     else
-        sizeOverage /= 4;
+        sizeOverage /= 2;
     
-    if(cacheSize > 2 * maintenance.sizeLimit)
-        NSLog(@"Something weird happened");
-
     NSLog(@"Started maintenance with key '%@'. Approximate cache size: %u bytes.", maintenance.cursor, cacheSize);
 
     BOOL(^block)(NSString *key, NSData *value) = ^BOOL(NSString *key, NSData *value) {
@@ -473,68 +563,33 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     [cacheDB iterateFromKey:maintenance.cursor toKey:kSDURLCacheMaintenanceTerminalKey block:block];
     
     
-    NSDate *youngest = [[evictionCandidates lastObject] lastAccessed];
-    
-    if([evictionCandidates count]) {
+    if(!maintenance.stop) {
         
-        NSUInteger oldSize = cacheSize;
-        NSUInteger newSize = oldSize > candidatesTotalSize ? oldSize - candidatesTotalSize : 0;
+        NSDate *youngest = [[evictionCandidates lastObject] lastAccessed];
         
-        NSLog(@"Deleting %d entries to reduce cache size (was %u bytes; will be %u bytes). Youngest: %@", [evictionCandidates count], oldSize, newSize, youngest);
-        [cacheDB deleteCachedURLResponsesForKeys:[evictionCandidates valueForKey:@"key"]];
-    }
-    
-    if(!maintenance.stop)
+        if([evictionCandidates count]) {
+            
+            NSUInteger oldSize = cacheSize;
+            NSUInteger newSize = oldSize > candidatesTotalSize ? oldSize - candidatesTotalSize : 0;
+            
+            NSLog(@"Deleting %d entries to reduce cache size (was %u bytes; will be %u bytes). Youngest: %@", [evictionCandidates count], oldSize, newSize, youngest);
+            [cacheDB deleteCachedURLResponsesForKeys:[evictionCandidates valueForKey:@"key"]];
+        }
+        
         maintenance.cursor = kSDURLCacheMaintenanceSmallestKey;
+    }
     
     NSLog(@"Finished maintenance with key '%@' (checked %u keys)", maintenance.stop ? maintenance.cursor : kSDURLCacheMaintenanceTerminalKey, counter);
 }
 
 - (void)initializeMaintenance {
     
-    self.maintenance = [[[SDURLCacheMaintenance alloc] init] autorelease];
+    self.maintenance = [[[SDURLCacheMaintenance alloc] initWithDatabase:db] autorelease];
+    
     self.maintenance.cursor = kSDURLCacheMaintenanceSmallestKey;
     self.maintenance.sizeLimit = self.diskCapacity;
     
-    _maintenanceTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _maintenanceQueue);
-    
-    if (_maintenanceTimer) {
-        dispatch_source_set_timer(_maintenanceTimer, dispatch_walltime(DISPATCH_TIME_NOW, kAFURLCacheMaintenanceTime * NSEC_PER_SEC), 
-                                  kAFURLCacheMaintenanceTime * NSEC_PER_SEC, kAFURLCacheMaintenanceTime/2 * NSEC_PER_SEC);
-
-        dispatch_source_set_event_handler(_maintenanceTimer, ^{
-            [self pauseMaintenance];
-            SDMaintainCache(db, maintenance);
-        });
-        
-        // initially wake up timer
-        dispatch_resume(_maintenanceTimer);
-    }
-    
-    // run the maintenance immediately
-    dispatch_async(_maintenanceQueue, ^{
-        SDMaintainCache(db, maintenance);
-    });
-}
-
-- (void)pauseMaintenance {
-    dispatch_async(dispatch_get_main_queue(), ^{
-
-        if(maintenance.paused) return;
-        
-        dispatch_suspend(_maintenanceTimer);
-        maintenance.paused = YES;
-    });
-}
-
-- (void)resumeMaintenance {
-    dispatch_async(dispatch_get_main_queue(), ^{
-
-        if(!maintenance.paused) return;
-        
-        dispatch_resume(_maintenanceTimer);
-        maintenance.paused = NO;
-    });
+    [self.maintenance runNow];
 }
 
 - (void)storeRequestToDisk:(NSURLRequest *)request response:(NSCachedURLResponse *)cachedResponse {
@@ -543,7 +598,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
 
         [db storeCachedURLResponse:cachedResponse forKey:[SDURLCache cacheKeyForURL:request.URL]];
         
-        if(!_offline) [self resumeMaintenance];
+        if(!_offline) [maintenance resume];
     });
 }
 
@@ -569,7 +624,6 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         _minCacheInterval = kAFURLCacheInfoDefaultMinCacheInterval;
         _ignoreMemoryOnlyStoragePolicy = YES;
         _diskCacheQueue = dispatch_queue_create("sdurlcache.processing", NULL);
-        _maintenanceQueue = dispatch_queue_create("sdurlcache.maintenance", NULL);
         self.diskCachePath = path;
         
         db = [[NULDBDB alloc] initWithLocation:path bufferSize:diskCapacity > 1<<24 ? 1<<22 : diskCapacity / 4];
@@ -631,7 +685,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         response = [db cachedURLResponseForKey:cacheKey];
         
         if(!self.offline && [response isExpired:NULL]) {
-            [db deleteCachedURLResponseForKey:cacheKey];
+            dispatch_async(_diskCacheQueue, ^{ [db deleteCachedURLResponseForKey:cacheKey]; });
             response = nil;
         }
         
@@ -647,17 +701,25 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     
     [super removeCachedResponseForRequest:request];
 
-    dispatch_async(_diskCacheQueue, ^{
-        [db deleteCachedURLResponseForKey:[SDURLCache cacheKeyForURL:request.URL]];
-    });
+    dispatch_async(_diskCacheQueue, ^{ [db deleteCachedURLResponseForKey:[SDURLCache cacheKeyForURL:request.URL]]; });
 }
 
 - (void)removeAllCachedResponses {
+    
+    NSLog(@"Asked to remove all cached responses. Stopping maintenance.");
+
     [super removeAllCachedResponses];
-    [db destroy];
-    [db release];
-    db = [[NULDBDB alloc] initWithLocation:self.diskCachePath];
-    self.maintenance = [[[SDURLCacheMaintenance alloc] init] autorelease];
+    
+    dispatch_async(_diskCacheQueue, ^{
+        NSLog(@"Releasing database.");
+        [db release], db = nil;
+        NSLog(@"Synching with maintenance queue.");
+        [maintenance synchronizeAndStop];
+        [NULDBDB destroyDatabase:self.diskCachePath];
+        NSLog(@"Re-creating database.");
+        db = [[NULDBDB alloc] initWithLocation:self.diskCachePath];
+        [self initializeMaintenance];
+    });
 }
 
 - (BOOL)isCached:(NSURL *)url {
@@ -674,12 +736,6 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     self.maintenance.stop = YES;
     self.maintenance = nil;
     self.mainPageURL = nil;
-    if(NULL != _maintenanceTimer) {
-        dispatch_source_cancel(_maintenanceTimer);
-        dispatch_release(_maintenanceTimer), _maintenanceTimer = NULL;
-    }
-    if(NULL != _maintenanceQueue)
-        dispatch_release(_maintenanceQueue), _diskCacheQueue = NULL;
     if(NULL != _diskCacheQueue)
         dispatch_release(_diskCacheQueue), _diskCacheQueue = NULL;
     [_diskCachePath release], _diskCachePath = nil;

@@ -24,8 +24,6 @@
     NSString *_diskCachePath;
 
     dispatch_queue_t _diskCacheQueue;
-    dispatch_queue_t _maintenanceQueue;
-    dispatch_source_t _maintenanceTimer;
     
     NSTimeInterval _minCacheInterval;
 
