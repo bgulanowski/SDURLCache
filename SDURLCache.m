@@ -111,15 +111,24 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 #define SDURLLastModifiedKeyForCacheKey(_key_) ([NSString stringWithFormat:@"$SDURLLastModified:%@", _key_])
 
+// These methods store the last modified date for the response in a separate db entry
+// They *don't* store the last modified date for the main Page URL, if it exists
+// thus, the main page URL will not ever be flushed from the cache
+// If necessary, we could keep an array of URLs which are meant to be ignored during cache flushes
 - (void)storeCachedURLResponse:(NSCachedURLResponse *)cachedResponse forKey:(NSString *)key {
     
     NSError *error = nil;
-    NSString *lastModifiedKey = SDURLLastModifiedKeyForCacheKey(key);
+    NSString *mainPageKey = [self storedStringForKey:kSDURLCacheMainPageURLKey error:NULL];
     
-    if(![self storeData:[NSKeyedArchiver archivedDataWithRootObject:[NSDate date]] forKey:lastModifiedKey error:&error])
-        NSLog(@"Error storing last modified key '%@': %@", lastModifiedKey, error);
-    
-    error = nil;
+    if(![mainPageKey isEqual:key]) {
+        NSString *lastAccessedKey = SDURLLastModifiedKeyForCacheKey(key);
+        
+        if(![self storeData:[NSKeyedArchiver archivedDataWithRootObject:[NSDate date]] forKey:lastAccessedKey error:&error])
+            NSLog(@"Error storing last modified key '%@': %@", lastAccessedKey, error);
+        
+        error = nil;
+    }
+
     if(![self storeData:[NSKeyedArchiver archivedDataWithRootObject:cachedResponse] forKey:key error:&error])
         NSLog(@"Error storing cached URL response for key '%@': %@", key, error);
 }
@@ -136,12 +145,16 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
         return nil;
     }
 
-    NSString *lastModifiedKey = SDURLLastModifiedKeyForCacheKey(key);
-
-    if(![self storeData:[NSKeyedArchiver archivedDataWithRootObject:[NSDate date]] forKey:lastModifiedKey error:&error])
-        NSLog(@"Error storing last modified key '%@': %@", lastModifiedKey, error);
+    NSString *mainPageKey = [self storedStringForKey:kSDURLCacheMainPageURLKey error:NULL];
     
-    error = nil;
+    if(![mainPageKey isEqual:key]) {
+        NSString *lastAccessedKey = SDURLLastModifiedKeyForCacheKey(key);
+        
+        if(![self storeData:[NSKeyedArchiver archivedDataWithRootObject:[NSDate date]] forKey:lastAccessedKey error:&error])
+            NSLog(@"Error storing last modified key '%@': %@", lastAccessedKey, error);
+        
+        error = nil;
+    }
 
     return [NSKeyedUnarchiver unarchiveObjectWithData:data];
 }
@@ -149,12 +162,17 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 - (void)deleteCachedURLResponseForKey:(NSString *)key {
     
     NSError *error = nil;    
-    NSString *lastModifiedKey = SDURLLastModifiedKeyForCacheKey(key);
+    NSString *mainPageKey = [self storedStringForKey:kSDURLCacheMainPageURLKey error:NULL];
     
-    if(![self deleteStoredDataForKey:lastModifiedKey error:&error])
-        NSLog(@"Error deleting last modified key '%@': %@", lastModifiedKey, error);
-
-    error = nil;
+    if(![mainPageKey isEqual:key]) {
+        NSString *lastAccesedKey = SDURLLastModifiedKeyForCacheKey(key);
+        
+        if(![self deleteStoredDataForKey:lastAccesedKey error:&error])
+            NSLog(@"Error deleting last modified key '%@': %@", lastAccesedKey, error);
+        
+        error = nil;
+    }
+    
     if(![self deleteStoredDataForKey:key error:&error])
         NSLog(@"Error deleting cached URL response for key '%@': %@", key, error);   
 }
@@ -192,17 +210,17 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 @interface SDURLResponseUsageInfo : NSObject {
     NSString *key;
-    NSDate *lastModified;
+    NSDate *lastAccessed;
 @public
     NSUInteger size;
 }
 @property (nonatomic, retain) NSString *key;
-@property (nonatomic, retain) NSDate *lastModified;
+@property (nonatomic, retain) NSDate *lastAccessed;
 @end
 
 
 @implementation SDURLResponseUsageInfo
-@synthesize key, lastModified;
+@synthesize key, lastAccessed;
 @end
 
 
@@ -216,8 +234,19 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
     maintenance.stop = flag;
 }
 
+- (void)setMainPageURL:(NSURL *)aURL {
+    if(![_mainPageURL isEqual:aURL]) {
+        [_mainPageURL release];
+        _mainPageURL = [aURL retain];
+        if(_mainPageURL)
+            [db storeString:[[self class] cacheKeyForURL:_mainPageURL] forKey:kSDURLCacheMainPageURLKey error:NULL];
+        else
+            [db deleteStoredDataForKey:kSDURLCacheMainPageURLKey error:NULL];
+    }
+}
 
-#pragma mark SDURLCache (tools)
+
+#pragma mark - SDURLCache (tools)
 
 + (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
     NSString *string = request.URL.absoluteString;
@@ -354,15 +383,23 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 }
 
 
-#define SIZE_FUDGE_FACTOR 1.2f
+#define SIZE_TOLERANCE_FACTOR 1.5f
 
 static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance) {
     
-    NSUInteger cacheSize = [cacheDB currentSizeEstimate] * SIZE_FUDGE_FACTOR;
-    NSUInteger sizeOverage = cacheSize > maintenance.sizeLimit ? cacheSize - maintenance.sizeLimit : 0;
+    NSUInteger cacheSize = [cacheDB currentSizeEstimate];
     NSMutableArray *evictionCandidates = maintenance.sizeLimit > 0 ? [NSMutableArray arrayWithCapacity:128] : nil;
     __block NSUInteger candidatesTotalSize = 0;
     __block NSUInteger counter = 0;
+    
+    // The size of the cache reported by leveldb is always way behind the actual size
+    // To dampen the effect of this, we only flush if we're sufficiently over-size, and we only remove 25% of the difference
+    NSUInteger sizeOverage = cacheSize > maintenance.sizeLimit ? cacheSize - maintenance.sizeLimit : 0;
+
+    if (sizeOverage < maintenance.sizeLimit / 8)
+        sizeOverage = 0;
+    else
+        sizeOverage /= 4;
     
     if(cacheSize > 2 * maintenance.sizeLimit)
         NSLog(@"Something weird happened");
@@ -379,31 +416,32 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         
         if(![response isKindOfClass:[NSCachedURLResponse class]]) return YES;
         
-        NSData *lmdata = [cacheDB storedDataForKey:SDURLLastModifiedKeyForCacheKey(key) error:NULL];
-        NSDate *lastModified = lmdata ? [NSKeyedUnarchiver unarchiveObjectWithData:lmdata] : nil;
+        NSData *lastAccessData = [cacheDB storedDataForKey:SDURLLastModifiedKeyForCacheKey(key) error:NULL];
+        NSDate *lastAccessedDate = lastAccessData ? [NSKeyedUnarchiver unarchiveObjectWithData:lastAccessData] : nil;
         
         if([response isExpired:NULL]) {
             NSLog(@"Evicting '%@' for being too old.", response.response.URL);
             [cacheDB deleteCachedURLResponseForKey:key];
         }
-        else if(sizeOverage > 0 && nil != lastModified) {
+        else if(sizeOverage > 0 && nil != lastAccessedDate) {
             
             SDURLResponseUsageInfo *usageInfo = [[SDURLResponseUsageInfo alloc] init];
             
             usageInfo.key = key;
-            usageInfo.lastModified = lastModified;
+            usageInfo.lastAccessed = lastAccessedDate;
 
             // If the index is low, this is an old object; if it's high (close to [evictionCandidates count], this is a new object
             NSUInteger index = [evictionCandidates indexOfObject:usageInfo
                                                    inSortedRange:NSMakeRange(0, [evictionCandidates count])
                                                          options:NSBinarySearchingFirstEqual|NSBinarySearchingInsertionIndex
                                                  usingComparator:^(SDURLResponseUsageInfo *obj1, SDURLResponseUsageInfo *obj2) {
-                                                     return [obj1.lastModified compare:obj2.lastModified];
+                                                     return [obj1.lastAccessed compare:obj2.lastAccessed];
                                                  }];
             
-            // if the index is last AND we don't need more space, skip this guy
             NSUInteger entrySize = [cacheDB sizeUsedByKey:key];
-            
+
+            // If the entry size is zero, it's a new entry, so skip
+            // If we've already got enough candidates and this guy isn't older than any existing candidates, skip
             if(entrySize > 0 && (index < [evictionCandidates count] || candidatesTotalSize < sizeOverage)) {
                 
                 candidatesTotalSize += usageInfo->size = entrySize;
@@ -434,12 +472,15 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     
     [cacheDB iterateFromKey:maintenance.cursor toKey:kSDURLCacheMaintenanceTerminalKey block:block];
     
+    
+    NSDate *youngest = [[evictionCandidates lastObject] lastAccessed];
+    
     if([evictionCandidates count]) {
         
         NSUInteger oldSize = cacheSize;
         NSUInteger newSize = oldSize > candidatesTotalSize ? oldSize - candidatesTotalSize : 0;
         
-        NSLog(@"Deleting %d entries to reduce cache size (was %u bytes; will be %u bytes)", [evictionCandidates count], oldSize, newSize);
+        NSLog(@"Deleting %d entries to reduce cache size (was %u bytes; will be %u bytes). Youngest: %@", [evictionCandidates count], oldSize, newSize, youngest);
         [cacheDB deleteCachedURLResponsesForKeys:[evictionCandidates valueForKey:@"key"]];
     }
     
