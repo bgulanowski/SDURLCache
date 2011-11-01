@@ -20,6 +20,7 @@
     
     NULDBDB *db;
     
+    NSURL *_mainPageURL;
     NSString *_diskCachePath;
 
     dispatch_queue_t _diskCacheQueue;
@@ -51,6 +52,8 @@
 @property (nonatomic, assign) BOOL ignoreMemoryOnlyStoragePolicy;
 
 @property (nonatomic, getter = isOffline) BOOL offline;
+
+@property (nonatomic, retain) NSURL *mainPageURL;
 
 /*
  * Returns a default cache director path to be used at cache initialization. The generated path directory

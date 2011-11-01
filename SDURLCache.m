@@ -30,13 +30,14 @@
 
 static NSTimeInterval const kAFURLCacheInfoDefaultMinCacheInterval = 5 * 60; // 5 minute
 
-static NSString *kSDURLCacheDiskUsageKey = @"SDURLCache:capacity";
+static NSString *kSDURLCacheDiskUsageKey    = @"SDURLCache:capacity";
+static NSString *kSDURLCacheMainPageURLKey  = @"SDURLCache:mainPageURL";
 
 static NSString *kSDURLCacheMaintenanceSmallestKey = @"0000000000000000";
 static NSString *kSDURLCacheMaintenanceTerminalKey = @"g";
 
 static float const kAFURLCacheLastModFraction = 0.1f; // 10% since Last-Modified suggested by RFC2616 section 13.2.4
-static float const kAFURLCacheDefault = 3600; // Default cache expiration delay if none defined (1 hour)
+static float const kAFURLCacheDefault         = 3600; // Default cache expiration delay if none defined (1 hour)
 
 static NSDateFormatter* CreateDateFormatter(NSString *format) {
     NSDateFormatter *dateFormatter = [[NSDateFormatter alloc] init];
@@ -70,6 +71,7 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 @property (nonatomic, retain) NSString *diskCachePath;
 @property (retain) SDURLCacheMaintenance *maintenance;
 + (NSDate *)expirationDateFromHeaders:(NSDictionary *)headers withStatusCode:(NSInteger)status;
++ (NSString *)cacheKeyForURL:(NSURL *)url;
 - (void)initializeMaintenance;
 - (void)pauseMaintenance;
 - (void)resumeMaintenance;
@@ -505,14 +507,17 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
 }
 
 
-#pragma mark SDURLCache
+#pragma mark - Accessors
+
+
+#pragma mark - SDURLCache
 
 + (NSString *)defaultCachePath {
     NSArray *paths = NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES);
     return [[paths objectAtIndex:0] stringByAppendingPathComponent:kAFURLCachePath];
 }
 
-#pragma mark NSURLCache
+#pragma mark - NSURLCache
 
 - (id)initWithMemoryCapacity:(NSUInteger)memoryCapacity diskCapacity:(NSUInteger)diskCapacity diskPath:(NSString *)path {
     
@@ -622,11 +627,12 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     return [db storedDataExistsForKey:[SDURLCache cacheKeyForURL:url]];
 }
 
-#pragma mark NSObject
+#pragma mark - NSObject
 
 - (void)dealloc {
     self.maintenance.stop = YES;
     self.maintenance = nil;
+    self.mainPageURL = nil;
     if(NULL != _maintenanceTimer) {
         dispatch_source_cancel(_maintenanceTimer);
         dispatch_release(_maintenanceTimer), _maintenanceTimer = NULL;
@@ -645,5 +651,6 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
 @synthesize ignoreMemoryOnlyStoragePolicy = _ignoreMemoryOnlyStoragePolicy;
 @synthesize diskCachePath = _diskCachePath;
 @synthesize offline = _offline;
+@synthesize mainPageURL = _mainPageURL;
 
 @end
