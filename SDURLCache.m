@@ -99,6 +99,8 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 + (NSDate *)expirationDateFromHeaders:(NSDictionary *)headers withStatusCode:(NSInteger)status;
 + (NSString *)cacheKeyForURL:(NSURL *)url;
 - (void)initializeMaintenance;
+- (void)handleApplicationWillResignActive:(NSNotification *)note;
+- (void)handleApplicationDidBecomeActive:(NSNotification *)note;
 @end
 
 
@@ -651,7 +653,17 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         db = [[NULDBDB alloc] initWithLocation:path bufferSize:diskCapacity > 1<<24 ? 1<<22 : diskCapacity / 4];
                 
         [self initializeMaintenance];
-	}
+        
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleApplicationWillResignActive:)
+                                                     name:UIApplicationWillResignActiveNotification
+                                                   object:nil];
+        
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleApplicationDidBecomeActive:)
+                                                     name:UIApplicationDidBecomeActiveNotification
+                                                   object:nil];
+         }
     
     return self;
 }
@@ -765,9 +777,15 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     return [db storedDataExistsForKey:[SDURLCache cacheKeyForURL:url]];
 }
 
+- (void)setDiskCapacity:(NSUInteger)capacity {
+    [super setDiskCapacity:capacity];
+    self.maintenance.sizeLimit = capacity;
+}
+
 #pragma mark - NSObject
 
 - (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
     self.maintenance.stop = YES;
     self.maintenance = nil;
     self.mainPageURL = nil;
@@ -778,6 +796,18 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     [super dealloc];
 }
 
+
+#pragma mark - Notification Handlers
+- (void)handleApplicationWillResignActive:(NSNotification *)note {
+    [maintenance pause];
+}
+
+- (void)handleApplicationDidBecomeActive:(NSNotification *)note {
+    [maintenance resume];
+}
+
+
+#pragma mark - properties
 @synthesize maintenance;
 @synthesize minCacheInterval = _minCacheInterval;
 @synthesize ignoreMemoryOnlyStoragePolicy = _ignoreMemoryOnlyStoragePolicy;
