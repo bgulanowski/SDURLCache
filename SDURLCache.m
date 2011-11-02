@@ -25,6 +25,27 @@
 #import <CommonCrypto/CommonDigest.h>
 
 
+/* Conditional support for the DDLog* macros from the Lumberjack logging framework.
+ * Add the Lumberjack files to your project and add #import "DDLog.h" to your pre-compiled header
+ */
+
+#ifndef DDLogVerbose
+#define DDLogError    NSLog
+#ifdef DEBUG
+#define DDLogVerbose NSLog
+#define DDLogCVerbose NSLog
+#else
+#define DDLogVerbose(...)
+#define DDLogCVerbose(...)
+#endif
+#else
+static const int ddLogLevel = LOG_LEVEL_VERBOSE;
+#endif
+
+#define NUMLoc()         DDLogVerbose(@"[%@:%@] %@", NSStringFromClass([self class]), NSStringFromSelector(_cmd), self)
+
+
+
 #define kAFURLCachePath @"SDNetworkingURLCache"
 #define kAFURLCacheMaintenanceTime 20ull
 
@@ -127,13 +148,13 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
         NSString *lastAccessedKey = SDURLLastModifiedKeyForCacheKey(key);
         
         if(![self storeData:[NSKeyedArchiver archivedDataWithRootObject:[NSDate date]] forKey:lastAccessedKey error:&error])
-            NSLog(@"Error storing last modified key '%@': %@", lastAccessedKey, error);
+            DDLogError(@"Error storing last modified key '%@': %@", lastAccessedKey, error);
         
         error = nil;
     }
 
     if(![self storeData:[NSKeyedArchiver archivedDataWithRootObject:cachedResponse] forKey:key error:&error])
-        NSLog(@"Error storing cached URL response for key '%@': %@", key, error);
+        DDLogError(@"Error storing cached URL response for key '%@': %@", key, error);
 }
 
 
@@ -144,7 +165,7 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
     if(nil == data) {
         if( nil != error)
-            NSLog(@"Error storing data for key '%@': %@", key, error);
+            DDLogError(@"Error storing data for key '%@': %@", key, error);
         return nil;
     }
 
@@ -154,7 +175,7 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
         NSString *lastAccessedKey = SDURLLastModifiedKeyForCacheKey(key);
         
         if(![self storeData:[NSKeyedArchiver archivedDataWithRootObject:[NSDate date]] forKey:lastAccessedKey error:&error])
-            NSLog(@"Error storing last modified key '%@': %@", lastAccessedKey, error);
+            DDLogError(@"Error storing last modified key '%@': %@", lastAccessedKey, error);
         
         error = nil;
     }
@@ -171,19 +192,19 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
         NSString *lastAccesedKey = SDURLLastModifiedKeyForCacheKey(key);
         
         if(![self deleteStoredDataForKey:lastAccesedKey error:&error])
-            NSLog(@"Error deleting last modified key '%@': %@", lastAccesedKey, error);
+            DDLogError(@"Error deleting last modified key '%@': %@", lastAccesedKey, error);
         
         error = nil;
     }
     
     if(![self deleteStoredDataForKey:key error:&error])
-        NSLog(@"Error deleting cached URL response for key '%@': %@", key, error);   
+        DDLogError(@"Error deleting cached URL response for key '%@': %@", key, error);   
 }
 
 - (void)deleteCachedURLResponsesForKeys:(NSArray *)keys {
     NSError *error = nil;
     if(![self deleteStoredStringsForKeys:keys error:&error])
-        NSLog(@"Error bulk deleting cached URL responses: %@", error);
+        DDLogError(@"Error bulk deleting cached URL responses: %@", error);
 }
 
 @end
@@ -494,7 +515,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     else
         sizeOverage /= 2;
     
-    NSLog(@"Started maintenance with key '%@'. Approximate cache size: %u bytes.", maintenance.cursor, cacheSize);
+    DDLogCVerbose(@"Started maintenance with key '%@'. Approximate cache size: %u bytes.", maintenance.cursor, cacheSize);
 
     BOOL(^block)(NSString *key, NSData *value) = ^BOOL(NSString *key, NSData *value) {
         
@@ -510,7 +531,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         NSDate *lastAccessedDate = lastAccessData ? [NSKeyedUnarchiver unarchiveObjectWithData:lastAccessData] : nil;
         
         if([response isExpired:NULL]) {
-            NSLog(@"Evicting '%@' for being too old.", response.response.URL);
+            DDLogCVerbose(@"Evicting '%@' for being too old.", response.response.URL);
             [cacheDB deleteCachedURLResponseForKey:key];
         }
         else if(sizeOverage > 0 && nil != lastAccessedDate) {
@@ -553,6 +574,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         ++counter;
         
         if(maintenance.stop) {
+            DDLogCVerbose(@"Stop flag is set; terminating early.");
             maintenance.cursor = key;
             return NO;
         }
@@ -572,14 +594,14 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
             NSUInteger oldSize = cacheSize;
             NSUInteger newSize = oldSize > candidatesTotalSize ? oldSize - candidatesTotalSize : 0;
             
-            NSLog(@"Deleting %d entries to reduce cache size (was %u bytes; will be %u bytes). Youngest: %@", [evictionCandidates count], oldSize, newSize, youngest);
+            DDLogCVerbose(@"Deleting %d entries to reduce cache size (was %u bytes; will be %u bytes). Youngest: %@", [evictionCandidates count], oldSize, newSize, youngest);
             [cacheDB deleteCachedURLResponsesForKeys:[evictionCandidates valueForKey:@"key"]];
         }
         
         maintenance.cursor = kSDURLCacheMaintenanceSmallestKey;
     }
     
-    NSLog(@"Finished maintenance with key '%@' (checked %u keys)", maintenance.stop ? maintenance.cursor : kSDURLCacheMaintenanceTerminalKey, counter);
+    DDLogCVerbose(@"Finished maintenance with key '%@' (checked %u keys)", maintenance.stop ? maintenance.cursor : kSDURLCacheMaintenanceTerminalKey, counter);
 }
 
 - (void)initializeMaintenance {
@@ -706,7 +728,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
 
 - (void)removeAllCachedResponses {
     
-    NSLog(@"Stopping maintenance and resetting database.");
+    DDLogVerbose(@"Stopping maintenance and resetting database.");
 
     [super removeAllCachedResponses];
     
@@ -731,7 +753,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         [NULDBDB destroyDatabase:self.diskCachePath];
         db = [[NULDBDB alloc] initWithLocation:self.diskCachePath];
         [self initializeMaintenance];
-        NSLog(@"Cache database has been reset.");
+        DDLogVerbose(@"Cache database has been reset.");
     });
 }
 
