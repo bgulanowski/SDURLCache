@@ -198,6 +198,7 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
     dispatch_queue_t _maintenanceQueue;
     dispatch_source_t _maintenanceTimer;
+    dispatch_group_t _maintenanceGroup;
     
     NSUInteger sizeLimit;
     BOOL paused;
@@ -232,7 +233,8 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
         db = [database retain];
         _maintenanceQueue = dispatch_queue_create("sdurlcache.maintenance", NULL);
         _maintenanceTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, _maintenanceQueue);
-        
+        _maintenanceGroup = dispatch_group_create();
+
         if (_maintenanceTimer) {
             dispatch_source_set_timer(_maintenanceTimer, dispatch_walltime(DISPATCH_TIME_NOW, kAFURLCacheMaintenanceTime * NSEC_PER_SEC), 
                                       kAFURLCacheMaintenanceTime * NSEC_PER_SEC, kAFURLCacheMaintenanceTime/2 * NSEC_PER_SEC);
@@ -247,7 +249,11 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 }
 
 - (void)runNow {
-    dispatch_async(_maintenanceQueue, ^{ SDMaintainCache(db, self); });
+    dispatch_async(_maintenanceQueue, ^{
+        dispatch_group_enter(_maintenanceGroup);
+        SDMaintainCache(db, self);
+        dispatch_group_leave(_maintenanceGroup);
+    });
 }
 
 - (void)pause {
@@ -277,20 +283,14 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
     }
     if(NULL != _maintenanceQueue)
         dispatch_release(_maintenanceQueue), _maintenanceQueue = NULL;
+    if(NULL != _maintenanceGroup)
+        dispatch_release(_maintenanceGroup), _maintenanceGroup = NULL;
 }
 
 - (void)synchronizeAndStop {
-    
-    self.stop = YES;
-    
-    dispatch_sync(_maintenanceQueue, ^{
-        NSLog(@"Maintenance is stopping.");
-        self.stop = NO;
-    });
-    
+    stop = YES;
+    dispatch_group_wait(_maintenanceGroup, DISPATCH_TIME_FOREVER);
     [self stopMaintenanceQueue];
-    
-    NSLog(@"Maintenance should be stopped.");
 }
 
 @end
@@ -706,19 +706,32 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
 
 - (void)removeAllCachedResponses {
     
-    NSLog(@"Asked to remove all cached responses. Stopping maintenance.");
+    NSLog(@"Stopping maintenance and resetting database.");
 
     [super removeAllCachedResponses];
     
+    /* Replace the existing database with a new empty one. We do this on the cache queue to interleave with cache writes.
+     * We release our reference to the existing db to prevent reads from starting on the db that is going away. The maintenance
+     * task has its own retained reference.
+     *
+     * The steps in the following block are important.
+     * 1. Stop the maintenance task. This will free up the block which holds the maintenance object, reducing its retain count.
+     * 2. Release the old database. Nothing else will try to access it at this point.
+     * 3. Destroy the old database.
+     * 4. Create the new database.
+     * 5. Reset the maintenance task; this releases the old maintenance and the old database.
+     *
+     */
+    
+    [db release], db = nil;
+
     dispatch_async(_diskCacheQueue, ^{
-        NSLog(@"Releasing database.");
-        [db release], db = nil;
-        NSLog(@"Synching with maintenance queue.");
         [maintenance synchronizeAndStop];
+        self.maintenance = nil;
         [NULDBDB destroyDatabase:self.diskCachePath];
-        NSLog(@"Re-creating database.");
         db = [[NULDBDB alloc] initWithLocation:self.diskCachePath];
         [self initializeMaintenance];
+        NSLog(@"Cache database has been reset.");
     });
 }
 
