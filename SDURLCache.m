@@ -589,14 +589,16 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     
     if(!maintenance.stop) {
         
-        NSDate *youngest = [[evictionCandidates lastObject] lastAccessed];
         
         if([evictionCandidates count]) {
             
+#ifdef DEBUG
             NSUInteger oldSize = cacheSize;
+            NSDate *youngest = [[evictionCandidates lastObject] lastAccessed];
             NSUInteger newSize = oldSize > candidatesTotalSize ? oldSize - candidatesTotalSize : 0;
             
             DDLogCVerbose(@"Deleting %d entries to reduce cache size (was %u bytes; will be %u bytes). Youngest: %@", [evictionCandidates count], oldSize, newSize, youngest);
+#endif
             [cacheDB deleteCachedURLResponsesForKeys:[evictionCandidates valueForKey:@"key"]];
         }
         
