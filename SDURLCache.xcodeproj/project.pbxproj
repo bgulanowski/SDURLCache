@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		4E02A7CC1461ABDD00210DD5 /* UIKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4E02A7CB1461ABDD00210DD5 /* UIKit.framework */; };
 		4E6037C714573A2F009214A2 /* NULevelDB.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 4E6037C614573A2F009214A2 /* NULevelDB.framework */; };
 		53F557F4114EA63600A3DA4B /* SDURLCache.h in Headers */ = {isa = PBXBuildFile; fileRef = 53F557F2114EA63600A3DA4B /* SDURLCache.h */; };
 		53F557F5114EA63600A3DA4B /* SDURLCache.m in Sources */ = {isa = PBXBuildFile; fileRef = 53F557F3114EA63600A3DA4B /* SDURLCache.m */; };
@@ -26,6 +27,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		4E02A7CB1461ABDD00210DD5 /* UIKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = UIKit.framework; path = System/Library/Frameworks/UIKit.framework; sourceTree = SDKROOT; };
 		4E6037C614573A2F009214A2 /* NULevelDB.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; path = NULevelDB.framework; sourceTree = "<group>"; };
 		53F557F2114EA63600A3DA4B /* SDURLCache.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SDURLCache.h; sourceTree = "<group>"; };
 		53F557F3114EA63600A3DA4B /* SDURLCache.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = SDURLCache.m; sourceTree = "<group>"; };
@@ -49,6 +51,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				4E02A7CC1461ABDD00210DD5 /* UIKit.framework in Frameworks */,
 				4E6037C714573A2F009214A2 /* NULevelDB.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -68,6 +71,7 @@
 		0867D691FE84028FC02AAC07 /* SDURLCache */ = {
 			isa = PBXGroup;
 			children = (
+				4E02A7CB1461ABDD00210DD5 /* UIKit.framework */,
 				08FB77AEFE84172EC02AAC07 /* Classes */,
 				32C88DFF0371C24200C91783 /* Other Sources */,
 				53F55929114F1EA300A3DA4B /* Tests */,
