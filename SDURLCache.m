@@ -218,6 +218,8 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
     NULDBDB *db;
     
     NSString *cursor;
+    
+    void(^_maintenanceBlock)(void);
 
     dispatch_queue_t _maintenanceQueue;
     dispatch_source_t _maintenanceTimer;
@@ -246,6 +248,7 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 - (void)dealloc {
     [db release], db = nil;
     self.cursor = nil;
+    [_maintenanceBlock release], _maintenanceBlock = nil;
     [self stopMaintenanceQueue];
     [super dealloc];
 }
@@ -259,10 +262,16 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
         _maintenanceGroup = dispatch_group_create();
 
         if (_maintenanceTimer) {
+            _maintenanceBlock = [^{
+                [self pause];
+                dispatch_group_enter(_maintenanceGroup);
+                SDMaintainCache(db, self);
+                dispatch_group_leave(_maintenanceGroup);
+            } copy];
             dispatch_source_set_timer(_maintenanceTimer, dispatch_walltime(DISPATCH_TIME_NOW, kAFURLCacheMaintenanceTime * NSEC_PER_SEC), 
                                       kAFURLCacheMaintenanceTime * NSEC_PER_SEC, kAFURLCacheMaintenanceTime/2 * NSEC_PER_SEC);
             
-            dispatch_source_set_event_handler(_maintenanceTimer, ^{ SDMaintainCache(db, self); });
+            dispatch_source_set_event_handler(_maintenanceTimer, _maintenanceBlock);
             
             dispatch_resume(_maintenanceTimer);
         }
@@ -272,11 +281,7 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 }
 
 - (void)runNow {
-    dispatch_async(_maintenanceQueue, ^{
-        dispatch_group_enter(_maintenanceGroup);
-        SDMaintainCache(db, self);
-        dispatch_group_leave(_maintenanceGroup);
-    });
+    dispatch_async(_maintenanceQueue, _maintenanceBlock);
 }
 
 - (void)pause {
@@ -589,16 +594,14 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     
     if(!maintenance.stop) {
         
+        NSDate *youngest = [[evictionCandidates lastObject] lastAccessed];
         
         if([evictionCandidates count]) {
             
-#ifdef DEBUG
             NSUInteger oldSize = cacheSize;
-            NSDate *youngest = [[evictionCandidates lastObject] lastAccessed];
             NSUInteger newSize = oldSize > candidatesTotalSize ? oldSize - candidatesTotalSize : 0;
             
             DDLogCVerbose(@"Deleting %d entries to reduce cache size (was %u bytes; will be %u bytes). Youngest: %@", [evictionCandidates count], oldSize, newSize, youngest);
-#endif
             [cacheDB deleteCachedURLResponsesForKeys:[evictionCandidates valueForKey:@"key"]];
         }
         
