@@ -167,7 +167,7 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
     if(nil == data) {
         if( nil != error)
-            DDLogError(@"Error storing data for key '%@': %@", key, error);
+            DDLogError(@"Error loading data for key '%@': %@", key, error);
         return nil;
     }
 
@@ -348,10 +348,13 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 #pragma mark - Accessors
 - (void)setOffline:(BOOL)flag {
-    _offline = flag;
-    if(flag)
-        [maintenance pause];
-    maintenance.stop = flag;
+    if(flag != _offline) {
+        _offline = flag;
+        if(flag)
+            [maintenance pause];
+        maintenance.stop = flag;
+        DDLogVerbose(@"Network: %@", _offline ? @"OFFLINE" : @"ACTIVE");
+    }
 }
 
 - (void)setMainPageURL:(NSURL *)aURL {
@@ -677,18 +680,22 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
 }
 
 - (void)storeCachedResponse:(NSCachedURLResponse *)cachedResponse forRequest:(NSURLRequest *)request {
+    
     request = [SDURLCache canonicalRequestForRequest:request];
     
+    BOOL doStore = YES;
+    NSString *denialReason = @"";
+
     if (request.cachePolicy == NSURLRequestReloadIgnoringLocalCacheData
         || request.cachePolicy == NSURLRequestReloadIgnoringLocalAndRemoteCacheData
         || request.cachePolicy == NSURLRequestReloadIgnoringCacheData) {
         // When cache is ignored for read, it's a good idea not to store the result as well as this option
         // have big chance to be used every times in the future for the same request.
         // NOTE: This is a change regarding default URLCache behavior
-        return;
+        denialReason = [NSString stringWithFormat:@"(cache policy: %d)", request.cachePolicy];
+        doStore = NO;
     }
-    
-    [super storeCachedResponse:cachedResponse forRequest:request];
+
     
     NSURLCacheStoragePolicy storagePolicy = cachedResponse.storagePolicy;
     
@@ -699,18 +706,38 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         NSDictionary *headers = [(NSHTTPURLResponse *)cachedResponse.response allHeaderFields];
         
         // RFC 2616 section 13.3.4 says clients MUST use Etag in any cache-conditional request if provided by server
-        if (![headers objectForKey:@"Etag"]) {
+        if (![headers objectForKey:@"Etag"] || _ignoreEtag) {
             
             NSDate *expirationDate = [SDURLCache expirationDateFromHeaders:headers
                                                             withStatusCode:((NSHTTPURLResponse *)cachedResponse.response).statusCode];
             
-            if (!expirationDate || [expirationDate timeIntervalSinceNow] - _minCacheInterval <= 0) {
+            if (!_ignoreExpiry && (!expirationDate || [expirationDate timeIntervalSinceNow] - _minCacheInterval <= 0)) {
                 // This response is not cacheable, headers said
-                return;
+                denialReason = [NSString stringWithFormat:@"(expiration: %@", expirationDate];
+                doStore = NO;
             }
         }
-        
+        else {
+            denialReason = [NSString stringWithFormat:@"Etag: %@", [headers objectForKey:@"Etag"]];
+            doStore = NO;
+        }
+    }
+    else
+        denialReason = [NSString stringWithFormat:@"storage policy: %d", storagePolicy];
+
+
+    if(!doStore) {
+        NSLog(@"DENY: %@ (%@)", request, denialReason);
+        if([request.URL isEqual:_mainPageURL]) {
+            doStore = YES;
+            NSLog(@"DENIAL OVERRIDE (required page for OFFLINE)");
+        }
+    }
+
+    if(doStore) {
+        [super storeCachedResponse:cachedResponse forRequest:request];
         [self storeRequestToDisk:request response:cachedResponse];
+        NSLog(@"STOR: %@", request);
     }
 }
 
@@ -726,19 +753,31 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
 
         response = [db cachedURLResponseForKey:cacheKey];
         
-        if(!self.offline && [response isExpired:NULL]) {
+        if(self.offline && nil != response) {
+            DDLogVerbose(@"LOAD: %@", request);
+        }
+        else if(!self.offline && [response isExpired:NULL]) {
             dispatch_async(_diskCacheQueue, ^{ [db deleteCachedURLResponseForKey:cacheKey]; });
             response = nil;
         }
         
         if (nil != response)
             [super storeCachedResponse:response forRequest:request];
+        else
+            DDLogVerbose(@"MISS: %@", request);
     }
     
     return response;
 }
 
 - (void)removeCachedResponseForRequest:(NSURLRequest *)request {
+    
+    // Don't delete the main page URL if we're offline, we need it
+    if(_offline && [request.URL isEqual:_mainPageURL])
+        return;
+    
+    DDLogVerbose(@"DROP: %@", request);
+    
     request = [SDURLCache canonicalRequestForRequest:request];
     
     [super removeCachedResponseForRequest:request];
@@ -822,5 +861,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
 @synthesize diskCachePath = _diskCachePath;
 @synthesize offline = _offline;
 @synthesize mainPageURL = _mainPageURL;
+@synthesize ignoreEtag = _ignoreEtag;
+@synthesize ignoreExpiry = _ignoreExpiry;
 
 @end

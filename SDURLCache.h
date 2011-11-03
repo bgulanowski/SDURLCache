@@ -29,6 +29,8 @@
 
     BOOL _ignoreMemoryOnlyStoragePolicy;
     BOOL _offline;
+    BOOL _ignoreEtag;
+    BOOL _ignoreExpiry;
 }
 
 /*
@@ -50,6 +52,8 @@
 @property (nonatomic, assign) BOOL ignoreMemoryOnlyStoragePolicy;
 
 @property (nonatomic, getter = isOffline) BOOL offline;
+@property (nonatomic) BOOL ignoreEtag;
+@property (nonatomic) BOOL ignoreExpiry;
 
 @property (nonatomic, retain) NSURL *mainPageURL;
 
