@@ -305,18 +305,21 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 }
 
 - (void)stopMaintenanceQueue {
-    if(NULL != _maintenanceTimer) {
-        dispatch_source_cancel(_maintenanceTimer);
-        dispatch_release(_maintenanceTimer), _maintenanceTimer = NULL;
-    }
-    if(NULL != _maintenanceQueue)
-        dispatch_release(_maintenanceQueue), _maintenanceQueue = NULL;
-    if(NULL != _maintenanceGroup)
-        dispatch_release(_maintenanceGroup), _maintenanceGroup = NULL;
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if(NULL != _maintenanceTimer) {
+            dispatch_source_cancel(_maintenanceTimer);
+            dispatch_release(_maintenanceTimer), _maintenanceTimer = NULL;
+        }
+        if(NULL != _maintenanceQueue)
+            dispatch_release(_maintenanceQueue), _maintenanceQueue = NULL;
+        if(NULL != _maintenanceGroup)
+            dispatch_release(_maintenanceGroup), _maintenanceGroup = NULL;
+    });
 }
 
 - (void)synchronizeAndStop {
     stop = YES;
+    [self resume];
     dispatch_group_wait(_maintenanceGroup, DISPATCH_TIME_FOREVER);
     [self stopMaintenanceQueue];
 }
