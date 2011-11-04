@@ -83,7 +83,10 @@ inline void dispatch_async_afreentrant(dispatch_queue_t queue, dispatch_block_t 
 #pragma mark SDURLCache (tools)
 
 + (NSURLRequest *)canonicalRequestForRequest:(NSURLRequest *)request {
-    NSString *string = request.URL.absoluteString;
+	if(request == nil)
+		return nil;
+	
+    NSString *string = [[request URL] absoluteString];
     NSRange hash = [string rangeOfString:@"#"];
     if (hash.location == NSNotFound)
         return request;
@@ -94,7 +97,10 @@ inline void dispatch_async_afreentrant(dispatch_queue_t queue, dispatch_block_t 
 }
 
 + (NSString *)cacheKeyForURL:(NSURL *)url {
-    const char *str = [url.absoluteString UTF8String];
+	if(url == nil)
+		return nil;
+	
+    const char *str = [[url absoluteString] UTF8String];
     unsigned char r[CC_MD5_DIGEST_LENGTH];
     CC_MD5(str, strlen(str), r);
     return [NSString stringWithFormat:@"%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x",
