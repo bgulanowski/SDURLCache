@@ -101,6 +101,7 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 - (void)initializeMaintenance;
 - (void)handleApplicationWillResignActive:(NSNotification *)note;
 - (void)handleApplicationDidBecomeActive:(NSNotification *)note;
+- (void)handleCompactionRequest:(NSNotification *)note;
 @end
 
 
@@ -213,6 +214,9 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 
 #pragma mark - SDURLCacheMaintenance
+
+static NSString *kNUDatabaseCompactionRequestNotification = @"NUDatabaseCompactionRequestNotification";
+
 @interface SDURLCacheMaintenance : NSObject {
     
     NULDBDB *db;
@@ -226,12 +230,14 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
     dispatch_group_t _maintenanceGroup;
     
     NSUInteger sizeLimit;
+    BOOL compactRequested;
     BOOL paused;
     BOOL stop;
 }
 
 @property (retain) NSString *cursor;
 @property (readwrite) NSUInteger sizeLimit;
+@property (readwrite) BOOL compactRequested;
 @property (readwrite) BOOL paused;
 @property (readwrite) BOOL stop;
 
@@ -243,7 +249,7 @@ static NSDateFormatter* CreateDateFormatter(NSString *format) {
 
 @implementation SDURLCacheMaintenance
 
-@synthesize cursor, sizeLimit, paused, stop;
+@synthesize cursor, sizeLimit, compactRequested, paused, stop;
 
 - (void)dealloc {
     [db release], db = nil;
@@ -527,7 +533,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         sizeOverage = 0;
     else
         sizeOverage /= 2;
-    
+
     DDLogCVerbose(@"Started maintenance with key '%@'. Approximate cache size: %u bytes.", maintenance.cursor, cacheSize);
 
     BOOL(^block)(NSString *key, NSData *value) = ^BOOL(NSString *key, NSData *value) {
@@ -599,15 +605,16 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     
     
     if(!maintenance.stop) {
-        
-        NSDate *youngest = [[evictionCandidates lastObject] lastAccessed];
-        
+                
         if([evictionCandidates count]) {
             
+#ifdef DEBUG
+            NSDate *youngest = [[evictionCandidates lastObject] lastAccessed];
             NSUInteger oldSize = cacheSize;
             NSUInteger newSize = oldSize > candidatesTotalSize ? oldSize - candidatesTotalSize : 0;
             
             DDLogCVerbose(@"Deleting %d entries to reduce cache size (was %u bytes; will be %u bytes). Youngest: %@", [evictionCandidates count], oldSize, newSize, youngest);
+#endif
             [cacheDB deleteCachedURLResponsesForKeys:[evictionCandidates valueForKey:@"key"]];
         }
         
@@ -615,6 +622,19 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     }
     
     DDLogCVerbose(@"Finished maintenance with key '%@' (checked %u keys)", maintenance.stop ? maintenance.cursor : kSDURLCacheMaintenanceTerminalKey, counter);
+    
+    if(sizeOverage == 0 && ! maintenance.compactRequested) {
+        // check the file size; if it's absurdly big, passively request a reload to initiate a compaction
+        NSUInteger fileSize = [cacheDB currentFileSizeEstimate];
+        
+        if(fileSize > 2 * maintenance.sizeLimit) {
+            maintenance.compactRequested = YES;
+            DDLogCVerbose(@"Requesting compaction");
+            [[NSNotificationCenter defaultCenter] postNotificationName:kNUDatabaseCompactionRequestNotification object:nil];
+        }
+    }
+    else
+        maintenance.compactRequested = NO;
 }
 
 - (void)initializeMaintenance {
@@ -630,7 +650,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
 - (void)storeRequestToDisk:(NSURLRequest *)request response:(NSCachedURLResponse *)cachedResponse {
     
     dispatch_async(_diskCacheQueue, ^{
-
+        
         [db storeCachedURLResponse:cachedResponse forKey:[SDURLCache cacheKeyForURL:request.URL]];
         
         if(!_offline) [maintenance resume];
@@ -674,10 +694,21 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
                                                  selector:@selector(handleApplicationDidBecomeActive:)
                                                      name:UIApplicationDidBecomeActiveNotification
                                                    object:nil];
-         }
+        [[NSNotificationCenter defaultCenter] addObserver:self
+                                                 selector:@selector(handleCompactionRequest:)
+                                                     name:kNUDatabaseCompactionRequestNotification
+                                                   object:nil];
+    }
     
     return self;
 }
+
+
+#if DEBUG
+#define SDMakeDebugString(_fmt_, ...) [NSString stringWithFormat:_fmt_, ##__VA_ARGS__]
+#else
+#define SDMakeDebugString(_fmt_, ...) nil
+#endif
 
 - (void)storeCachedResponse:(NSCachedURLResponse *)cachedResponse forRequest:(NSURLRequest *)request {
     
@@ -692,7 +723,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
         // When cache is ignored for read, it's a good idea not to store the result as well as this option
         // have big chance to be used every times in the future for the same request.
         // NOTE: This is a change regarding default URLCache behavior
-        denialReason = [NSString stringWithFormat:@"(cache policy: %d)", request.cachePolicy];
+        denialReason = SDMakeDebugString(@"(cache policy: %d)", request.cachePolicy);
         doStore = NO;
     }
 
@@ -713,31 +744,31 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
             
             if (!_ignoreExpiry && (!expirationDate || [expirationDate timeIntervalSinceNow] - _minCacheInterval <= 0)) {
                 // This response is not cacheable, headers said
-                denialReason = [NSString stringWithFormat:@"(expiration: %@", expirationDate];
+                denialReason = SDMakeDebugString(@"expiration: %@", expirationDate);
                 doStore = NO;
             }
         }
         else {
-            denialReason = [NSString stringWithFormat:@"Etag: %@", [headers objectForKey:@"Etag"]];
+            denialReason = SDMakeDebugString(@"Etag");
             doStore = NO;
         }
     }
     else
-        denialReason = [NSString stringWithFormat:@"storage policy: %d", storagePolicy];
+        denialReason = SDMakeDebugString(@"storage policy: %d", storagePolicy);
 
 
     if(!doStore) {
-        NSLog(@"DENY: %@ (%@)", request, denialReason);
+//        DDLogVerbose(@"DENY: %@ (%@)", request.URL, denialReason);
         if([request.URL isEqual:_mainPageURL]) {
             doStore = YES;
-            NSLog(@"DENIAL OVERRIDE (required page for OFFLINE)");
+//            NSLog(@"DENIAL OVERRIDE (required page for OFFLINE)");
         }
     }
 
     if(doStore) {
         [super storeCachedResponse:cachedResponse forRequest:request];
         [self storeRequestToDisk:request response:cachedResponse];
-        NSLog(@"STOR: %@", request);
+//        DDLogVerbose(@"STOR: %@", request.URL);
     }
 }
 
@@ -753,18 +784,18 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
 
         response = [db cachedURLResponseForKey:cacheKey];
         
-        if(self.offline && nil != response) {
-            DDLogVerbose(@"LOAD: %@", request);
-        }
-        else if(!self.offline && [response isExpired:NULL]) {
+//        if(self.offline && nil != response)
+//            DDLogVerbose(@"LOAD: %@", request.URL);
+        
+        if(!self.offline && [response isExpired:NULL]) {
             dispatch_async(_diskCacheQueue, ^{ [db deleteCachedURLResponseForKey:cacheKey]; });
             response = nil;
         }
         
         if (nil != response)
             [super storeCachedResponse:response forRequest:request];
-        else
-            DDLogVerbose(@"MISS: %@", request);
+//        else
+//            DDLogVerbose(@"MISS: %@", request.URL);
     }
     
     return response;
@@ -776,7 +807,7 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
     if(_offline && [request.URL isEqual:_mainPageURL])
         return;
     
-    DDLogVerbose(@"DROP: %@", request);
+//    DDLogVerbose(@"DROP: %@", request.URL);
     
     request = [SDURLCache canonicalRequestForRequest:request];
     
@@ -850,7 +881,16 @@ static void SDMaintainCache(NULDBDB *cacheDB, SDURLCacheMaintenance *maintenance
 }
 
 - (void)handleApplicationDidBecomeActive:(NSNotification *)note {
-    [maintenance resume];
+    if(!_offline) [maintenance resume];
+}
+
+- (void)handleCompactionRequest:(NSNotification *)note {
+    dispatch_async(_diskCacheQueue, ^{
+        [maintenance pause];
+        [db reopen];
+        [self initializeMaintenance];
+        if(!_offline) [maintenance resume];
+    });
 }
 
 
